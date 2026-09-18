@@ -18,7 +18,6 @@ import TreeFeature from "../features/TreeFeature";
 import WaterAreaFeature from "../features/WaterAreaFeature";
 import WaterLineFeature from "../features/WaterLineFeature";
 import ContourFeature from "../features/ContourFeature";
-import type { VisibleLayers } from "../types/map.types";
 
 import FeatureInfoPanel from "../panels/FeatureInfoPannel";
 
@@ -26,24 +25,57 @@ import MapBounds from "./MapBounds";
 import MapMask from "./MapMask";
 import MapRotation from "./MapRotation";
 
-import { useCityMapData } from "../hooks/useCityMapData";
+import type {
+    Building,
+    City,
+    Contour,
+    Intersection,
+    Road,
+    Tree,
+    WaterArea,
+    WaterLine,
+    VisibleLayers,
+} from "../types/map.types";
 
 type CityMapProps = {
+    selectedCityId: number;
+    setSelectedCityId: (
+        id: number,
+    ) => void;
     visibleLayers: VisibleLayers;
+    cities: City[];
+    roads: Road[];
+    intersections: Intersection[];
+    buildings: Building[];
+    trees: Tree[];
+    waterAreas: WaterArea[];
+    waterLines: WaterLine[];
+    contours: Contour[];
+    boundary: [number, number][][];
+    loading: boolean;
+    error: string | null;
 };
 
 export default function CityMap({
+    selectedCityId,
+    setSelectedCityId,
     visibleLayers,
+    cities,
+    roads,
+    intersections,
+    buildings,
+    trees,
+    waterAreas,
+    waterLines,
+    contours,
+    boundary,
+    loading,
+    error,
 }: CityMapProps) {
-    const [selectedCityId, setSelectedCityId] =
-        useState(1);
-
-    // --------------------------------
-    // Selection state
-    // --------------------------------
-
-    const [selectedRoadId, setSelectedRoadId] =
-        useState<number | null>(null);
+    const [
+        selectedRoadId,
+        setSelectedRoadId,
+    ] = useState<number | null>(null);
 
     const [
         selectedIntersectionId,
@@ -55,8 +87,10 @@ export default function CityMap({
         setSelectedBuildingId,
     ] = useState<number | null>(null);
 
-    const [selectedTreeId, setSelectedTreeId] =
-        useState<number | null>(null);
+    const [
+        selectedTreeId,
+        setSelectedTreeId,
+    ] = useState<number | null>(null);
 
     const [
         selectedWaterAreaId,
@@ -73,84 +107,6 @@ export default function CityMap({
         setSelectedContourId,
     ] = useState<number | null>(null);
 
-    // --------------------------------
-    // City map data
-    // --------------------------------
-
-    const {
-        cities,
-        roads,
-        intersections,
-        buildings,
-        trees,
-        waterAreas,
-        waterLines,
-        contours,
-        boundary,
-        loading,
-        error,
-    } = useCityMapData(selectedCityId);
-
-    // --------------------------------
-    // Selection handlers
-    // --------------------------------
-
-    const toggleRoadSelection = (id: number) => {
-        setSelectedRoadId((currentId) =>
-            currentId === id ? null : id,
-        );
-    };
-
-    const toggleIntersectionSelection = (
-        id: number,
-    ) => {
-        setSelectedIntersectionId((currentId) =>
-            currentId === id ? null : id,
-        );
-    };
-
-    const toggleBuildingSelection = (
-        id: number,
-    ) => {
-        setSelectedBuildingId((currentId) =>
-            currentId === id ? null : id,
-        );
-    };
-
-    const toggleTreeSelection = (id: number) => {
-        setSelectedTreeId((currentId) =>
-            currentId === id ? null : id,
-        );
-    };
-
-    const toggleWaterAreaSelection = (
-        id: number,
-    ) => {
-        setSelectedWaterAreaId((currentId) =>
-            currentId === id ? null : id,
-        );
-    };
-
-    const toggleWaterLineSelection = (
-        id: number,
-    ) => {
-        setSelectedWaterLineId((currentId) =>
-            currentId === id ? null : id,
-        );
-    };
-
-    const toggleContourSelection = (
-        id: number,
-    ) => {
-        setSelectedContourId((currentId) =>
-            currentId === id ? null : id,
-        );
-    };
-
-    // --------------------------------
-    // Clear all selections
-    // --------------------------------
-
     const clearSelection = () => {
         setSelectedRoadId(null);
         setSelectedIntersectionId(null);
@@ -161,12 +117,70 @@ export default function CityMap({
         setSelectedContourId(null);
     };
 
-    // --------------------------------
-    // Find selected features
-    // --------------------------------
+    const toggleRoadSelection = (
+        id: number,
+    ) => {
+        setSelectedRoadId((currentId) =>
+            currentId === id ? null : id,
+        );
+    };
+
+    const toggleIntersectionSelection = (
+        id: number,
+    ) => {
+        setSelectedIntersectionId(
+            (currentId) =>
+                currentId === id ? null : id,
+        );
+    };
+
+    const toggleBuildingSelection = (
+        id: number,
+    ) => {
+        setSelectedBuildingId(
+            (currentId) =>
+                currentId === id ? null : id,
+        );
+    };
+
+    const toggleTreeSelection = (
+        id: number,
+    ) => {
+        setSelectedTreeId((currentId) =>
+            currentId === id ? null : id,
+        );
+    };
+
+    const toggleWaterAreaSelection = (
+        id: number,
+    ) => {
+        setSelectedWaterAreaId(
+            (currentId) =>
+                currentId === id ? null : id,
+        );
+    };
+
+    const toggleWaterLineSelection = (
+        id: number,
+    ) => {
+        setSelectedWaterLineId(
+            (currentId) =>
+                currentId === id ? null : id,
+        );
+    };
+
+    const toggleContourSelection = (
+        id: number,
+    ) => {
+        setSelectedContourId(
+            (currentId) =>
+                currentId === id ? null : id,
+        );
+    };
 
     const selectedRoad = roads.find(
-        (road) => road.id === selectedRoadId,
+        (road) =>
+            road.id === selectedRoadId,
     );
 
     const selectedIntersection =
@@ -182,74 +196,69 @@ export default function CityMap({
     );
 
     const selectedTree = trees.find(
-        (tree) => tree.id === selectedTreeId,
+        (tree) =>
+            tree.id === selectedTreeId,
     );
 
-    const selectedWaterArea = waterAreas.find(
-        (waterArea) =>
-            waterArea.id === selectedWaterAreaId,
-    );
+    const selectedWaterArea =
+        waterAreas.find(
+            (waterArea) =>
+                waterArea.id ===
+                selectedWaterAreaId,
+        );
 
-    const selectedWaterLine = waterLines.find(
-        (waterLine) =>
-            waterLine.id === selectedWaterLineId,
-    );
+    const selectedWaterLine =
+        waterLines.find(
+            (waterLine) =>
+                waterLine.id ===
+                selectedWaterLineId,
+        );
 
     const selectedContour = contours.find(
         (contour) =>
             contour.id === selectedContourId,
     );
 
-    // --------------------------------
-    // Unified selected feature
-    // --------------------------------
-
     const selectedFeature =
         selectedRoad
             ? {
-                type: "road" as const,
-                feature: selectedRoad,
-            }
+                  type: "road" as const,
+                  feature: selectedRoad,
+              }
             : selectedIntersection
-                ? {
+              ? {
                     type: "intersection" as const,
                     feature: selectedIntersection,
                 }
-                : selectedBuilding
-                    ? {
-                        type: "building" as const,
-                        feature: selectedBuilding,
+              : selectedBuilding
+                ? {
+                      type: "building" as const,
+                      feature: selectedBuilding,
+                  }
+                : selectedTree
+                  ? {
+                        type: "tree" as const,
+                        feature: selectedTree,
                     }
-                    : selectedTree
-                        ? {
-                            type: "tree" as const,
-                            feature: selectedTree,
+                  : selectedWaterArea
+                    ? {
+                          type: "waterArea" as const,
+                          feature: selectedWaterArea,
+                      }
+                    : selectedWaterLine
+                      ? {
+                            type: "waterLine" as const,
+                            feature: selectedWaterLine,
                         }
-                        : selectedWaterArea
-                            ? {
-                                type: "waterArea" as const,
-                                feature: selectedWaterArea,
-                            }
-                            : selectedWaterLine
-                                ? {
-                                    type: "waterLine" as const,
-                                    feature: selectedWaterLine,
-                                }
-                                : selectedContour
-                                    ? {
-                                        type: "contour" as const,
-                                        feature: selectedContour,
-                                    }
-                                    : null;
-
-    // --------------------------------
-    // Selection status
-    // --------------------------------
+                      : selectedContour
+                        ? {
+                              type: "contour" as const,
+                              feature: selectedContour,
+                          }
+                        : null;
 
     return (
         <div className="relative h-full w-full">
-            {/* City selector */}
-
             <div className="absolute left-4 top-4 z-[1000]">
                 <select
                     value={selectedCityId}
@@ -276,7 +285,6 @@ export default function CityMap({
                 </select>
             </div>
 
-            {/* Map */}
             {loading && (
                 <div className="absolute inset-0 z-[2000] flex items-center justify-center bg-white/80 backdrop-blur-sm">
                     <div className="rounded-lg border bg-white px-5 py-3 text-sm font-medium text-gray-700 shadow-md">
@@ -309,9 +317,30 @@ export default function CityMap({
                 </div>
             )}
 
+            {!loading &&
+                !error &&
+                boundary.length === 0 && (
+                    <div className="absolute inset-0 z-[2000] flex items-center justify-center bg-white/90">
+                        <div className="rounded-xl border bg-white p-5 text-center shadow-lg">
+                            <h2 className="text-sm font-semibold text-gray-900">
+                                No map data available
+                            </h2>
+
+                            <p className="mt-2 text-sm text-gray-500">
+                                This city does not
+                                have geographic
+                                data available
+                                yet.
+                            </p>
+                        </div>
+                    </div>
+                )}
+
             <MapContainer
                 center={[0, 0]}
                 zoom={10}
+                zoomSnap={0.5}
+                zoomDelta={0.5}
                 rotate={true}
                 bearing={77}
                 dragRotate={false}
@@ -327,8 +356,6 @@ export default function CityMap({
                     attribution="&copy; OpenStreetMap contributors"
                     url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 />
-
-                {/* City boundary */}
 
                 {boundary.length > 0 && (
                     <>
@@ -363,79 +390,96 @@ export default function CityMap({
                     </>
                 )}
 
-                {/* Waterways */}
+                {visibleLayers.waterways &&
+                    waterAreas.map(
+                        (waterArea) => (
+                            <WaterAreaFeature
+                                key={
+                                    waterArea.id
+                                }
+                                waterArea={
+                                    waterArea
+                                }
+                                selected={
+                                    selectedWaterAreaId ===
+                                    waterArea.id
+                                }
+                                onSelect={
+                                    toggleWaterAreaSelection
+                                }
+                            />
+                        ),
+                    )}
 
                 {visibleLayers.waterways &&
-                    waterAreas.map((waterArea) => (
-                        <WaterAreaFeature
-                            key={waterArea.id}
-                            waterArea={waterArea}
-                            selected={
-                                selectedWaterAreaId ===
-                                waterArea.id
-                            }
-                            onSelect={
-                                toggleWaterAreaSelection
-                            }
-                        />
-                    ))}
-
-                {visibleLayers.waterways &&
-                    waterLines.map((waterLine) => (
-                        <WaterLineFeature
-                            key={waterLine.id}
-                            waterLine={waterLine}
-                            selected={
-                                selectedWaterLineId ===
-                                waterLine.id
-                            }
-                            onSelect={
-                                toggleWaterLineSelection
-                            }
-                        />
-                    ))}
-
-                {/* Contours */}
+                    waterLines.map(
+                        (waterLine) => (
+                            <WaterLineFeature
+                                key={
+                                    waterLine.id
+                                }
+                                waterLine={
+                                    waterLine
+                                }
+                                selected={
+                                    selectedWaterLineId ===
+                                    waterLine.id
+                                }
+                                onSelect={
+                                    toggleWaterLineSelection
+                                }
+                            />
+                        ),
+                    )}
 
                 {visibleLayers.contours &&
-                    contours.map((contour) => (
-                        <ContourFeature
-                            key={contour.id}
-                            contour={contour}
-                            selected={
-                                selectedContourId ===
-                                contour.id
-                            }
-                            onSelect={
-                                toggleContourSelection
-                            }
-                        />
-                    ))}
-
-                {/* Buildings */}
+                    contours.map(
+                        (contour) => (
+                            <ContourFeature
+                                key={
+                                    contour.id
+                                }
+                                contour={
+                                    contour
+                                }
+                                selected={
+                                    selectedContourId ===
+                                    contour.id
+                                }
+                                onSelect={
+                                    toggleContourSelection
+                                }
+                            />
+                        ),
+                    )}
 
                 {visibleLayers.buildings &&
-                    buildings.map((building) => (
-                        <BuildingFeature
-                            key={building.id}
-                            building={building}
-                            selected={
-                                selectedBuildingId ===
-                                building.id
-                            }
-                            onSelect={
-                                toggleBuildingSelection
-                            }
-                        />
-                    ))}
-
-                {/* Trees */}
+                    buildings.map(
+                        (building) => (
+                            <BuildingFeature
+                                key={
+                                    building.id
+                                }
+                                building={
+                                    building
+                                }
+                                selected={
+                                    selectedBuildingId ===
+                                    building.id
+                                }
+                                onSelect={
+                                    toggleBuildingSelection
+                                }
+                            />
+                        ),
+                    )}
 
                 {visibleLayers.trees &&
                     trees
                         .filter(
                             (tree) =>
-                                tree.id % 3 === 0,
+                                tree.id % 3 ===
+                                0,
                         )
                         .map((tree) => (
                             <TreeFeature
@@ -451,8 +495,6 @@ export default function CityMap({
                             />
                         ))}
 
-                {/* Roads */}
-
                 {visibleLayers.roads &&
                     roads.map((road) => (
                         <RoadFeature
@@ -467,8 +509,6 @@ export default function CityMap({
                             }
                         />
                     ))}
-
-                {/* Intersections */}
 
                 {visibleLayers.intersections &&
                     intersections.map(
@@ -491,19 +531,17 @@ export default function CityMap({
                         ),
                     )}
 
-                {/* City mask */}
-
                 {boundary.length > 0 && (
                     <MapMask
                         boundary={boundary}
                     />
                 )}
 
-                {/* Feature information */}
-
                 {selectedFeature && (
                     <FeatureInfoPanel
-                        selectedFeature={selectedFeature}
+                        selectedFeature={
+                            selectedFeature
+                        }
                         onClose={clearSelection}
                     />
                 )}
