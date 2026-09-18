@@ -87,7 +87,7 @@ async function main() {
                 ST_Transform(
                     ST_SetSRID(
                         ST_GeomFromGeoJSON(${geometry}),
-                        32644
+                        5070
                     ),
                     4326
                 )

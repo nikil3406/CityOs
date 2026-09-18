@@ -1,12 +1,27 @@
 "use client";
 
-import dynamic from "next/dynamic";
+import { useState } from "react";
 
-const CityMap = dynamic(() => import("@/components/map/CityMap"), {
-    ssr: false,
-    loading: () => <div>Loading map...</div>,
-});
+import CityMap from "@/components/map/map/CityMap";
+
+import type { VisibleLayers } from "@/components/map/types/map.types";
 
 export default function MapPage() {
-    return <CityMap />;
+    const [visibleLayers, setVisibleLayers] =
+        useState<VisibleLayers>({
+            roads: false,
+            intersections: false,
+            buildings: false,
+            trees: false,
+            waterways: false,
+            contours: false,
+        });
+
+    return (
+        <main className="h-screen w-full">
+            <CityMap
+                visibleLayers={visibleLayers}
+            />
+        </main>
+    );
 }

@@ -57,7 +57,7 @@ async function importContours() {
                 ST_Transform(
                     ST_SetSRID(
                         ST_GeomFromGeoJSON(${geometryJson}),
-                        32644
+                        5070
                     ),
                     4326
                 )

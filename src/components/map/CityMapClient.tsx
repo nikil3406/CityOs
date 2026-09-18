@@ -2,13 +2,25 @@
 
 import dynamic from "next/dynamic";
 
+import type { VisibleLayers } from "./types/map.types";
+
 const CityMap = dynamic(
-    () => import("./CityMap"),
+    () => import("./map/CityMap"),
     {
         ssr: false,
     },
 );
 
-export default function CityMapClient() {
-    return <CityMap />;
+type CityMapClientProps = {
+    visibleLayers: VisibleLayers;
+};
+
+export default function CityMapClient({
+    visibleLayers,
+}: CityMapClientProps) {
+    return (
+        <CityMap
+            visibleLayers={visibleLayers}
+        />
+    );
 }

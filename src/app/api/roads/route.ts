@@ -34,29 +34,48 @@ export async function GET(request: Request) {
             }
         }
 
-        const query = db
-            .select({
-                id: roads.id,
-                cityId: roads.cityId,
-                name: roads.name,
-                startIntersectionId: roads.startIntersectionId,
-                endIntersectionId: roads.endIntersectionId,
-                geometry: sql`
-          ST_AsGeoJSON(${roads.geometry})::json
-        `.as("geometry"),
-                lengthMeters: roads.lengthMeters,
-                speedLimitKmh: roads.speedLimitKmh,
-                createdAt: roads.createdAt,
-                updatedAt: roads.updatedAt,
-            })
-            .from(roads);
+        const result = await db.execute(sql`
+            SELECT
+                r.id,
+                r.city_id AS "cityId",
+                r.name,
+                r.start_intersection_id AS "startIntersectionId",
+                r.end_intersection_id AS "endIntersectionId",
 
-        const result =
-            cityId !== undefined
-                ? await query
-                    .where(eq(roads.cityId, cityId))
-                    .orderBy(roads.name)
-                : await query.orderBy(roads.name);
+                ST_AsGeoJSON(
+                    ST_LineMerge(
+                        ST_CollectionExtract(
+                            ST_Intersection(
+                                r.geometry,
+                                c.boundary
+                            ),
+                            2
+                        )
+                    )
+                )::json AS geometry,
+
+                r.length_meters AS "lengthMeters",
+                r.speed_limit_kmh AS "speedLimitKmh",
+                r.created_at AS "createdAt",
+                r.updated_at AS "updatedAt"
+
+            FROM roads r
+
+            JOIN cities c
+                ON c.id = r.city_id
+
+            WHERE
+                ${cityId !== undefined
+                    ? sql`r.city_id = ${cityId}`
+                    : sql`TRUE`}
+                AND c.boundary IS NOT NULL
+                AND ST_Intersects(
+                    r.geometry,
+                    c.boundary
+                )
+
+            ORDER BY r.name;
+        `);
 
         return NextResponse.json(result);
     } catch (error) {

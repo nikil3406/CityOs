@@ -1,6 +1,21 @@
+"use client";
+
+import { useState } from "react";
+
 import CityMapClient from "@/components/map/CityMapClient";
 
+import type { VisibleLayers } from "@/components/map/types/map.types";
+
 export default function DashboardPage() {
+    const [visibleLayers, setVisibleLayers] =
+        useState<VisibleLayers>({
+            roads: false,
+            intersections: false,
+            buildings: false,
+            trees: false,
+            waterways: false,
+            contours: false,
+        });
     return (
         <main className="min-h-screen bg-slate-50">
             <header className="border-b bg-white px-8 py-6">
@@ -13,11 +28,13 @@ export default function DashboardPage() {
                 </p>
             </header>
 
-            
+
             <div className="grid min-h-[calc(100vh-81px)] grid-cols-1 gap-4 p-4 lg:grid-cols-[1.1fr_1fr]">
-                <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
-                    <div className="aspect-square w-full">
-                        <CityMapClient />
+                <section className="h-full min-h-[650px] overflow-hidden rounded-2xl border bg-white shadow-sm">
+                    <div className="h-full w-full">
+                        <CityMapClient
+                            visibleLayers={visibleLayers}
+                        />
                     </div>
                 </section>
 
@@ -91,53 +108,129 @@ export default function DashboardPage() {
                         </div>
                     </section>
 
-                    <section className="rounded-xl border bg-white p-5 shadow-sm">
-                        <h2 className="text-lg font-semibold">
+                    <div className="rounded-2xl border bg-white p-5 shadow-sm">
+                        <h2 className="text-base font-semibold text-gray-900">
                             City Infrastructure
                         </h2>
 
+                        <p className="mt-1 text-sm text-gray-500">
+                            Select the components to display on the map.
+                        </p>
+
                         <div className="mt-4 space-y-3">
-                            <div className="flex items-center justify-between border-b pb-3">
-                                <span className="text-sm text-slate-600">
+                            <label className="flex cursor-pointer items-center gap-3">
+                                <input
+                                    type="checkbox"
+                                    checked={visibleLayers.roads}
+                                    onChange={(event) =>
+                                        setVisibleLayers((current) => ({
+                                            ...current,
+                                            roads: event.target.checked,
+                                        }))
+                                    }
+                                    className="h-4 w-4 rounded border-gray-300"
+                                />
+
+                                <span className="text-sm text-gray-700">
+                                    Roads
+                                </span>
+                            </label>
+
+                            <label className="flex cursor-pointer items-center gap-3">
+                                <input
+                                    type="checkbox"
+                                    checked={visibleLayers.intersections}
+                                    onChange={(event) =>
+                                        setVisibleLayers((current) => ({
+                                            ...current,
+                                            intersections:
+                                                event.target.checked,
+                                        }))
+                                    }
+                                    className="h-4 w-4 rounded border-gray-300"
+                                />
+
+                                <span className="text-sm text-gray-700">
+                                    Intersections
+                                </span>
+                            </label>
+
+                            <label className="flex cursor-pointer items-center gap-3">
+                                <input
+                                    type="checkbox"
+                                    checked={visibleLayers.buildings}
+                                    onChange={(event) =>
+                                        setVisibleLayers((current) => ({
+                                            ...current,
+                                            buildings:
+                                                event.target.checked,
+                                        }))
+                                    }
+                                    className="h-4 w-4 rounded border-gray-300"
+                                />
+
+                                <span className="text-sm text-gray-700">
                                     Buildings
                                 </span>
+                            </label>
 
-                                <span className="text-sm font-medium">
-                                    Dataset layer
-                                </span>
-                            </div>
+                            <label className="flex cursor-pointer items-center gap-3">
+                                <input
+                                    type="checkbox"
+                                    checked={visibleLayers.trees}
+                                    onChange={(event) =>
+                                        setVisibleLayers((current) => ({
+                                            ...current,
+                                            trees: event.target.checked,
+                                        }))
+                                    }
+                                    className="h-4 w-4 rounded border-gray-300"
+                                />
 
-                            <div className="flex items-center justify-between border-b pb-3">
-                                <span className="text-sm text-slate-600">
+                                <span className="text-sm text-gray-700">
                                     Trees
                                 </span>
+                            </label>
 
-                                <span className="text-sm font-medium">
-                                    Dataset layer
-                                </span>
-                            </div>
+                            <label className="flex cursor-pointer items-center gap-3">
+                                <input
+                                    type="checkbox"
+                                    checked={visibleLayers.waterways}
+                                    onChange={(event) =>
+                                        setVisibleLayers((current) => ({
+                                            ...current,
+                                            waterways:
+                                                event.target.checked,
+                                        }))
+                                    }
+                                    className="h-4 w-4 rounded border-gray-300"
+                                />
 
-                            <div className="flex items-center justify-between border-b pb-3">
-                                <span className="text-sm text-slate-600">
+                                <span className="text-sm text-gray-700">
                                     Waterways
                                 </span>
+                            </label>
 
-                                <span className="text-sm font-medium">
-                                    Dataset layer
-                                </span>
-                            </div>
+                            <label className="flex cursor-pointer items-center gap-3">
+                                <input
+                                    type="checkbox"
+                                    checked={visibleLayers.contours}
+                                    onChange={(event) =>
+                                        setVisibleLayers((current) => ({
+                                            ...current,
+                                            contours:
+                                                event.target.checked,
+                                        }))
+                                    }
+                                    className="h-4 w-4 rounded border-gray-300"
+                                />
 
-                            <div className="flex items-center justify-between">
-                                <span className="text-sm text-slate-600">
+                                <span className="text-sm text-gray-700">
                                     Contours
                                 </span>
-
-                                <span className="text-sm font-medium">
-                                    Dataset layer
-                                </span>
-                            </div>
+                            </label>
                         </div>
-                    </section>
+                    </div>
                 </aside>
             </div>
         </main>

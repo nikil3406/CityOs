@@ -18,24 +18,58 @@ export async function GET(request: Request) {
         }
 
         const areas = await db.execute(sql`
-            SELECT
-                id,
-                city_id AS "cityId",
-                ST_AsGeoJSON(geometry)::json AS geometry
-            FROM water_areas
-            WHERE city_id = ${id}
-            ORDER BY id;
-        `);
+    SELECT
+        wa.id,
+        wa.city_id AS "cityId",
+        ST_AsGeoJSON(
+            ST_Multi(
+                ST_CollectionExtract(
+                    ST_Intersection(
+                        wa.geometry,
+                        c.boundary
+                    ),
+                    3
+                )
+            )
+        )::json AS geometry
+    FROM water_areas wa
+    JOIN cities c
+        ON c.id = wa.city_id
+    WHERE wa.city_id = ${id}
+      AND c.boundary IS NOT NULL
+      AND ST_Intersects(
+          wa.geometry,
+          c.boundary
+      )
+    ORDER BY wa.id;
+`);
 
         const lines = await db.execute(sql`
-            SELECT
-                id,
-                city_id AS "cityId",
-                ST_AsGeoJSON(geometry)::json AS geometry
-            FROM water_lines
-            WHERE city_id = ${id}
-            ORDER BY id;
-        `);
+    SELECT
+        wl.id,
+        wl.city_id AS "cityId",
+        ST_AsGeoJSON(
+            ST_Multi(
+                ST_CollectionExtract(
+                    ST_Intersection(
+                        wl.geometry,
+                        c.boundary
+                    ),
+                    2
+                )
+            )
+        )::json AS geometry
+    FROM water_lines wl
+    JOIN cities c
+        ON c.id = wl.city_id
+    WHERE wl.city_id = ${id}
+      AND c.boundary IS NOT NULL
+      AND ST_Intersects(
+          wl.geometry,
+          c.boundary
+      )
+    ORDER BY wl.id;
+`);
 
         return NextResponse.json({
             areas,

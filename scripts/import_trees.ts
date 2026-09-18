@@ -62,7 +62,7 @@ async function importTrees() {
                 ST_Transform(
                     ST_SetSRID(
                         ST_MakePoint(${x}, ${y}),
-                        32644
+                        5070
                     ),
                     4326
                 )

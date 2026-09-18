@@ -4,27 +4,13 @@ import fs from "fs";
 import path from "path";
 import postgres from "postgres";
 
-type WaterAreaGeoJSON = {
-    type: "FeatureCollection";
-    features: {
-        geometry: {
-            type: "MultiPolygon";
-            coordinates: number[][][][];
-        };
-        properties: null;
-    }[];
-};
+const databaseUrl = process.env.DATABASE_URL;
 
-type WaterLineGeoJSON = {
-    type: "FeatureCollection";
-    features: {
-        geometry: {
-            type: "MultiLineString";
-            coordinates: number[][][];
-        };
-        properties: null;
-    }[];
-};
+if (!databaseUrl) {
+    throw new Error("DATABASE_URL is not defined");
+}
+
+const sql = postgres(databaseUrl);
 
 const areaFilePath = path.join(
     process.cwd(),
@@ -32,33 +18,55 @@ const areaFilePath = path.join(
     "waterways_Base_Overture_0.geojson",
 );
 
-const lineFilePath = path.join(
+const polygonFilePath = path.join(
     process.cwd(),
     "data",
     "waterways_Base_Overture_2.geojson",
 );
 
-const areaData: WaterAreaGeoJSON = JSON.parse(
+type MultiPolygonFeature = {
+    type: "Feature";
+    geometry: {
+        type: "MultiPolygon";
+        coordinates: number[][][][];
+    };
+    properties: null;
+};
+
+type PolygonFeature = {
+    type: "Feature";
+    geometry: {
+        type: "Polygon";
+        coordinates: number[][][];
+    };
+    properties: null;
+};
+
+type MultiPolygonGeoJSON = {
+    type: "FeatureCollection";
+    features: MultiPolygonFeature[];
+};
+
+type PolygonGeoJSON = {
+    type: "FeatureCollection";
+    features: PolygonFeature[];
+};
+
+const areaData: MultiPolygonGeoJSON = JSON.parse(
     fs.readFileSync(areaFilePath, "utf-8"),
 );
 
-const lineData: WaterLineGeoJSON = JSON.parse(
-    fs.readFileSync(lineFilePath, "utf-8"),
+const polygonData: PolygonGeoJSON = JSON.parse(
+    fs.readFileSync(polygonFilePath, "utf-8"),
 );
-
-if (!process.env.DATABASE_URL) {
-    throw new Error("DATABASE_URL is not defined");
-}
-
-const sql = postgres(process.env.DATABASE_URL);
 
 async function importWaterways() {
     console.log(
-        `Found ${areaData.features.length} water area features`,
+        `Found ${areaData.features.length} multipolygon water features`,
     );
 
     console.log(
-        `Found ${lineData.features.length} water line features`,
+        `Found ${polygonData.features.length} polygon water features`,
     );
 
     for (const feature of areaData.features) {
@@ -74,7 +82,7 @@ async function importWaterways() {
                 ST_Transform(
                     ST_SetSRID(
                         ST_GeomFromGeoJSON(${geometryJson}),
-                        32644
+                        5070
                     ),
                     4326
                 )
@@ -82,11 +90,14 @@ async function importWaterways() {
         `;
     }
 
-    for (const feature of lineData.features) {
-        const geometryJson = JSON.stringify(feature.geometry);
+    for (const feature of polygonData.features) {
+        const geometryJson = JSON.stringify({
+            type: "MultiPolygon",
+            coordinates: [feature.geometry.coordinates],
+        });
 
         await sql`
-            INSERT INTO water_lines (
+            INSERT INTO water_areas (
                 city_id,
                 geometry
             )
@@ -95,7 +106,7 @@ async function importWaterways() {
                 ST_Transform(
                     ST_SetSRID(
                         ST_GeomFromGeoJSON(${geometryJson}),
-                        32644
+                        5070
                     ),
                     4326
                 )
