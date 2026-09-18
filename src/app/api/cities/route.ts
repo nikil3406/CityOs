@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import { cities } from "@/db/schema";
@@ -11,6 +12,7 @@ export async function GET() {
         name: cities.name,
         country: cities.country,
         center: cities.center,
+        boundary: sql`ST_AsGeoJSON(${cities.boundary})::json`,
         createdAt: cities.createdAt,
         updatedAt: cities.updatedAt,
       })

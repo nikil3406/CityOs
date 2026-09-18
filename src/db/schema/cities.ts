@@ -1,32 +1,33 @@
 import {
-    integer,
-    pgTable,
-    text,
-    timestamp,
-    geometry,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  geometry,
 } from "drizzle-orm/pg-core";
 
 export const cities = pgTable("cities", {
-    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
-    name: text("name").notNull(),
+  name: text("name").notNull(),
 
-    country: text("country").notNull(),
+  country: text("country").notNull(),
 
-    center: geometry("center", {
-        type: "point",
-        srid: 4326,
-    }).notNull(),
+  center: geometry("center", {
+    type: "point",
+    srid: 4326,
+  }).notNull(),
 
-    createdAt: timestamp("created_at", {
-        withTimezone: true,
-    })
-        .defaultNow()
-        .notNull(),
+  boundary: geometry("boundary", {
+    type: "polygon",
+    srid: 4326,
+  }),
 
-    updatedAt: timestamp("updated_at", {
-        withTimezone: true,
-    })
-        .defaultNow()
-        .notNull(),
+  createdAt: timestamp("created_at", {
+    withTimezone: true,
+  }).defaultNow().notNull(),
+
+  updatedAt: timestamp("updated_at", {
+    withTimezone: true,
+  }).defaultNow().notNull(),
 });

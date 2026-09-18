@@ -22,6 +22,34 @@
       "when": 1788889222100,
       "tag": "0002_real_ultragirl",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789709484754,
+      "tag": "0003_real_sphinx",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789710580283,
+      "tag": "0004_wise_electro",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789712923587,
+      "tag": "0005_polite_jack_murdock",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789713576701,
+      "tag": "0006_bumpy_mongoose",
+      "breakpoints": true
     }
   ]
 }

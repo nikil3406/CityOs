@@ -4,6 +4,7 @@ import {
     text,
     timestamp,
     geometry,
+    real,
 } from "drizzle-orm/pg-core";
 
 import { cities } from "./cities";
@@ -20,17 +21,25 @@ export const roads = pgTable("roads", {
 
     name: text("name").notNull(),
 
-    startIntersectionId: integer("start_intersection_id")
-        .notNull()
-        .references(() => intersections.id, {
-            onDelete: "cascade",
-        }),
+    sourceId: text("source_id").unique(),
 
-    endIntersectionId: integer("end_intersection_id")
-        .notNull()
-        .references(() => intersections.id, {
+    startIntersectionId: integer("start_intersection_id").references(
+        () => intersections.id,
+        {
             onDelete: "cascade",
-        }),
+        },
+    ),
+
+    endIntersectionId: integer("end_intersection_id").references(
+        () => intersections.id,
+        {
+            onDelete: "cascade",
+        },
+    ),
+
+    type: text("type"),
+
+    width: real("width"),
 
     geometry: geometry("geometry", {
         type: "linestring",
@@ -39,7 +48,7 @@ export const roads = pgTable("roads", {
 
     lengthMeters: integer("length_meters").notNull(),
 
-    speedLimitKmh: integer("speed_limit_kmh").notNull(),
+    speedLimitKmh: integer("speed_limit_kmh"),
 
     createdAt: timestamp("created_at", {
         withTimezone: true,
