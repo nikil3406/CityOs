@@ -1,0 +1,1 @@
+ALTER TABLE "vehicles" ADD COLUMN "route_sequence" integer DEFAULT 0 NOT NULL;

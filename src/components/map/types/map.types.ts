@@ -12,6 +12,7 @@ export type City = {
 export type Road = {
     id: number;
     name: string;
+    type: string | null;
     startIntersectionId: number | null;
     endIntersectionId: number | null;
     lengthMeters: number;
@@ -83,4 +84,16 @@ export type VisibleLayers = {
     trees: boolean;
     waterways: boolean;
     contours: boolean;
+};
+
+export type SimulationVehicle = {
+    id: number;
+    simulationRunId: number;
+    currentRoadId: number | null;
+    destinationIntersectionId: number | null;
+    routeSequence: number;
+    progress: number;
+    speedKmh: number;
+    status: string;
+    position: [number, number];
 };

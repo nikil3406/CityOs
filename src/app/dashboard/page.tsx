@@ -45,6 +45,10 @@ export default function DashboardPage() {
         }));
     };
 
+    const vehicleRoads = roads.filter(
+        (road) => road.type?.toLowerCase() !== "footway",
+    );
+
     return (
         <main className="min-h-screen bg-slate-50">
             <header className="border-b bg-white px-8 py-6">
@@ -107,7 +111,7 @@ export default function DashboardPage() {
                                 <p className="mt-1 text-2xl font-semibold text-slate-800">
                                     {loading
                                         ? "—"
-                                        : roads.length}
+                                        : vehicleRoads.length}
                                 </p>
                             </div>
 
@@ -342,7 +346,7 @@ export default function DashboardPage() {
                                     {loading
                                         ? "—"
                                         : waterAreas.length +
-                                          waterLines.length}
+                                        waterLines.length}
                                 </span>
                             </label>
 

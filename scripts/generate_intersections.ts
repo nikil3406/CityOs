@@ -1,5 +1,4 @@
 import "dotenv/config";
-
 import postgres from "postgres";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -10,86 +9,106 @@ if (!databaseUrl) {
 
 const sql = postgres(databaseUrl);
 
+const CITY_ID = 1;
+const ENDPOINT_TOLERANCE_METERS = 2;
+
 async function generateIntersections() {
-    console.log("Generating intersections...");
+    console.log(
+        "Generating vehicle-road intersections...",
+    );
 
     await sql`
         DELETE FROM intersections
-        WHERE city_id = 1;
+        WHERE city_id = ${CITY_ID};
     `;
 
     const result = await sql`
-        WITH road_pairs AS (
+        WITH vehicle_roads AS (
             SELECT
-                r1.geometry AS geometry_1,
-                r2.geometry AS geometry_2
-            FROM roads r1
-            JOIN roads r2
-                ON r1.id < r2.id
+                id,
+                geometry
+            FROM roads
             WHERE
-                r1.city_id = 1
-                AND r2.city_id = 1
-                AND ST_Intersects(
-                    r1.geometry,
-                    r2.geometry
-                )
+                city_id = ${CITY_ID}
+                AND LOWER(
+                    COALESCE(type, '')
+                ) <> 'footway'
         ),
 
-        intersection_points AS (
+        road_endpoints AS (
             SELECT
-                ST_CollectionExtract(
-                    ST_Intersection(
-                        geometry_1,
-                        geometry_2
-                    ),
-                    1
+                id AS road_id,
+                'START' AS endpoint_type,
+                ST_Transform(
+                    ST_StartPoint(geometry),
+                    3857
                 ) AS geometry
-            FROM road_pairs
-        ),
+            FROM vehicle_roads
 
-        points AS (
+            UNION ALL
+
             SELECT
-                (ST_Dump(geometry)).geom AS geometry
-            FROM intersection_points
-            WHERE NOT ST_IsEmpty(geometry)
+                id AS road_id,
+                'END' AS endpoint_type,
+                ST_Transform(
+                    ST_EndPoint(geometry),
+                    3857
+                ) AS geometry
+            FROM vehicle_roads
         ),
 
         clustered AS (
             SELECT
-                ST_SnapToGrid(
+                *,
+                ST_ClusterDBSCAN(
                     geometry,
-                    0.00001
+                    eps := ${ENDPOINT_TOLERANCE_METERS},
+                    minpoints := 2
+                ) OVER () AS cluster_id
+            FROM road_endpoints
+        ),
+
+        cluster_points AS (
+            SELECT
+                cluster_id,
+                ST_Centroid(
+                    ST_Collect(geometry)
                 ) AS geometry
-            FROM points
+            FROM clustered
+            WHERE cluster_id IS NOT NULL
+            GROUP BY cluster_id
         )
 
         INSERT INTO intersections (
             city_id,
             location
         )
-        SELECT DISTINCT
-            1,
-            geometry
-        FROM clustered
-        WHERE ST_GeometryType(geometry) = 'ST_Point'
+        SELECT
+            ${CITY_ID},
+            ST_Transform(
+                geometry,
+                4326
+            )
+        FROM cluster_points
         RETURNING id;
     `;
 
     console.log(
-        `Generated ${result.length} intersections.`,
+        `Generated ${result.length} vehicle intersections.`,
     );
 
     await sql.end();
 }
 
-generateIntersections().catch(async (error) => {
-    console.error(
-        "Intersection generation failed:",
-        error,
-    );
+generateIntersections().catch(
+    async (error) => {
+        console.error(
+            "Intersection generation failed:",
+            error,
+        );
 
-    await sql.end();
+        await sql.end();
 
-    process.exit(1);
-});import "dotenv/config";
-
+        process.exit(1);
+    },
+);

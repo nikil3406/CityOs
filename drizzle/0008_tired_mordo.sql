@@ -1,0 +1,1 @@
+ALTER TABLE "vehicles" ADD COLUMN "progress" real DEFAULT 0 NOT NULL;
