@@ -1,10 +1,9 @@
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import { db } from "@/db";
-import {
-    trafficLights,
-    trafficLightPhases,
-} from "@/db/schema";
+import { trafficLights } from "@/db/schema";
+
+import { getTrafficLightPhase } from "./traffic_light_phase.service";
 
 export async function getTrafficLight(
     trafficLightId: number,
@@ -13,50 +12,22 @@ export async function getTrafficLight(
         .select({
             id: trafficLights.id,
             cityId: trafficLights.cityId,
-            intersectionId: trafficLights.intersectionId,
-            cycleDuration: trafficLights.cycleDuration,
-            currentPhase: trafficLights.currentPhase,
-            phaseElapsed: trafficLights.phaseElapsed,
-            status: trafficLights.status,
+            intersectionId:
+                trafficLights.intersectionId,
+            cycleDuration:
+                trafficLights.cycleDuration,
+            currentPhase:
+                trafficLights.currentPhase,
+            phaseElapsed:
+                trafficLights.phaseElapsed,
+            status:
+                trafficLights.status,
         })
         .from(trafficLights)
         .where(
             eq(
                 trafficLights.id,
                 trafficLightId,
-            ),
-        )
-        .limit(1);
-
-    return result[0] ?? null;
-}
-
-export async function getTrafficLightPhase(
-    trafficLightId: number,
-    phaseNumber: number,
-) {
-    const result = await db
-        .select({
-            id: trafficLightPhases.id,
-            trafficLightId:
-                trafficLightPhases.trafficLightId,
-            phaseNumber:
-                trafficLightPhases.phaseNumber,
-            durationSeconds:
-                trafficLightPhases.durationSeconds,
-            state: trafficLightPhases.state,
-        })
-        .from(trafficLightPhases)
-        .where(
-            and(
-                eq(
-                    trafficLightPhases.trafficLightId,
-                    trafficLightId,
-                ),
-                eq(
-                    trafficLightPhases.phaseNumber,
-                    phaseNumber,
-                ),
             ),
         )
         .limit(1);
@@ -104,8 +75,10 @@ export async function updateTrafficLight(
         const result = await db
             .update(trafficLights)
             .set({
-                phaseElapsed: newElapsed,
-                updatedAt: new Date(),
+                phaseElapsed:
+                    newElapsed,
+                updatedAt:
+                    new Date(),
             })
             .where(
                 eq(
@@ -118,6 +91,14 @@ export async function updateTrafficLight(
         return result[0];
     }
 
+    /*
+     * Phase progression will be made
+     * dynamic after the six-phase
+     * strategy is implemented.
+     *
+     * For now this preserves the
+     * currently working behavior.
+     */
     const nextPhase =
         light.currentPhase >= 4
             ? 1
@@ -126,9 +107,11 @@ export async function updateTrafficLight(
     const result = await db
         .update(trafficLights)
         .set({
-            currentPhase: nextPhase,
+            currentPhase:
+                nextPhase,
             phaseElapsed: 0,
-            updatedAt: new Date(),
+            updatedAt:
+                new Date(),
         })
         .where(
             eq(

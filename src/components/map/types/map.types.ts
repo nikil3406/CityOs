@@ -35,7 +35,7 @@ export type Building = {
     minHeight: number | null;
     geometry: {
         type: "MultiPolygon";
-        coordinates: number[][][][];
+        coordinates: [number, number][][][];
     };
 };
 
@@ -54,7 +54,7 @@ export type WaterArea = {
     cityId: number;
     geometry: {
         type: "MultiPolygon";
-        coordinates: number[][][][];
+        coordinates: [number, number][][][];
     };
 };
 
@@ -63,7 +63,7 @@ export type WaterLine = {
     cityId: number;
     geometry: {
         type: "MultiLineString";
-        coordinates: number[][][];
+        coordinates: [number, number][][];
     };
 };
 

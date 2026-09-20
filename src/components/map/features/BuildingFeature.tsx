@@ -4,6 +4,7 @@ import { memo } from "react";
 import { Polygon } from "react-leaflet";
 
 import type { Building } from "../types/map.types";
+import { toLatLngPolygon } from "../utils/map.utils";
 
 type BuildingFeatureProps = {
     building: Building;
@@ -23,22 +24,7 @@ const BuildingFeature = memo(
                     (polygon, polygonIndex) => (
                         <Polygon
                             key={`${building.id}-${polygonIndex}`}
-                            positions={polygon.map(
-                                (ring) =>
-                                    ring.map(
-                                        ([
-                                            longitude,
-                                            latitude,
-                                        ]) =>
-                                            [
-                                                latitude,
-                                                longitude,
-                                            ] as [
-                                                number,
-                                                number,
-                                            ],
-                                    ),
-                            )}
+                            positions={toLatLngPolygon(polygon)}
                             pathOptions={{
                                 color: selected
                                     ? "#2563eb"

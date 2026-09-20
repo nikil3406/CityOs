@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
     getVehicleRoadNetwork,
-} from "@/modules/simulation/road_network.service";
+} from "@/modules/road/road_network.service";
 
 type RouteContext = {
     params: Promise<{ id: string }>;

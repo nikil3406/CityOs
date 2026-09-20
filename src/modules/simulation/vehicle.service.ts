@@ -9,7 +9,7 @@ import {
 import {
     getReachableIntersections,
     findShortestRoute,
-} from "./routing.service";
+} from "@/modules/road/routing.service";
 
 type GeneratedVehicle = {
     id: number;

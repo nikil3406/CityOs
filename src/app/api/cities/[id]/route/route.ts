@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
     findShortestRoute,
-} from "@/modules/simulation/routing.service";
+} from "@/modules/road/routing.service";
 
 type RouteContext = {
     params: Promise<{ id: string }>;

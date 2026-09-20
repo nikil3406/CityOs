@@ -4,6 +4,7 @@ import { memo } from "react";
 import { Polyline } from "react-leaflet";
 
 import type { Road } from "../types/map.types";
+import { toLatLngList } from "../utils/map.utils";
 
 type RoadFeatureProps = {
     road: Road;
@@ -19,12 +20,8 @@ const RoadFeature = memo(
     }: RoadFeatureProps) {
         return (
             <Polyline
-                positions={road.geometry.coordinates.map(
-                    ([longitude, latitude]) =>
-                        [
-                            latitude,
-                            longitude,
-                        ] as [number, number],
+                positions={toLatLngList(
+                    road.geometry.coordinates,
                 )}
                 pathOptions={{
                     color: selected

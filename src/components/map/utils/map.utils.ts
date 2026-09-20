@@ -54,3 +54,17 @@ export function calculateMapBearing(
         (bestBearing - 90 + 360) % 360
     );
 }
+
+export type LatLngTuple = [number, number];
+
+export function toLatLng([lon, lat]: [number, number]): LatLngTuple {
+    return [lat, lon];
+}
+
+export function toLatLngList(coords: [number, number][]): LatLngTuple[] {
+    return coords.map(toLatLng);
+}
+
+export function toLatLngPolygon(rings: [number, number][][]): LatLngTuple[][] {
+    return rings.map(toLatLngList);
+}

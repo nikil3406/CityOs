@@ -4,6 +4,7 @@ import { memo } from "react";
 import { Polyline } from "react-leaflet";
 
 import type { WaterLine } from "../types/map.types";
+import { toLatLngList } from "../utils/map.utils";
 
 type WaterLineFeatureProps = {
     waterLine: WaterLine;
@@ -23,18 +24,8 @@ const WaterLineFeature = memo(
                     (line, lineIndex) => (
                         <Polyline
                             key={`${waterLine.id}-${lineIndex}`}
-                            positions={line.map(
-                                ([
-                                    longitude,
-                                    latitude,
-                                ]) =>
-                                    [
-                                        latitude,
-                                        longitude,
-                                    ] as [
-                                        number,
-                                        number,
-                                    ],
+                            positions={toLatLngList(
+                                line as [number, number][],
                             )}
                             pathOptions={{
                                 color: selected

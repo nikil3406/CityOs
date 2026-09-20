@@ -1,7 +1,7 @@
 import {
     getVehicleRoadNetwork,
     type NetworkSegment,
-} from "./road_network.service";
+} from "../road/road_network.service";
 
 type GraphEdge = {
     segment: NetworkSegment;
@@ -372,9 +372,9 @@ export async function findShortestRoute(
      */
     if (
         destinationDistance ===
-            undefined ||
+        undefined ||
         destinationDistance ===
-            Infinity
+        Infinity
     ) {
         return null;
     }

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { SimulationConfig } from "@/lib/constants";
 import type { SimulationVehicle } from "../types/map.types";
 
 export function useSimulationVehicles(
@@ -87,7 +88,7 @@ export function useSimulationVehicles(
          */
         interval = setInterval(
             fetchVehicles,
-            3000,
+            SimulationConfig.tickIntervalMs,
         );
 
         return () => {

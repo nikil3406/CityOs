@@ -4,6 +4,7 @@ import { memo } from "react";
 import { Polygon } from "react-leaflet";
 
 import type { WaterArea } from "../types/map.types";
+import { toLatLngPolygon } from "../utils/map.utils";
 
 type WaterAreaFeatureProps = {
     waterArea: WaterArea;
@@ -23,22 +24,7 @@ const WaterAreaFeature = memo(
                     (polygon, polygonIndex) => (
                         <Polygon
                             key={`${waterArea.id}-${polygonIndex}`}
-                            positions={polygon.map(
-                                (ring) =>
-                                    ring.map(
-                                        ([
-                                            longitude,
-                                            latitude,
-                                        ]) =>
-                                            [
-                                                latitude,
-                                                longitude,
-                                            ] as [
-                                                number,
-                                                number,
-                                            ],
-                                    ),
-                            )}
+                            positions={toLatLngPolygon(polygon)}
                             pathOptions={{
                                 color: selected
                                     ? "#1d4ed8"

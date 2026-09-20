@@ -4,6 +4,7 @@ import { memo } from "react";
 import { Polyline } from "react-leaflet";
 
 import type { Contour } from "../types/map.types";
+import { toLatLngList } from "../utils/map.utils";
 
 type ContourFeatureProps = {
     contour: Contour;
@@ -19,12 +20,8 @@ const ContourFeature = memo(
     }: ContourFeatureProps) {
         return (
             <Polyline
-                positions={contour.geometry.coordinates.map(
-                    ([longitude, latitude]) =>
-                        [
-                            latitude,
-                            longitude,
-                        ] as [number, number],
+                positions={toLatLngList(
+                    contour.geometry.coordinates,
                 )}
                 pathOptions={{
                     color: selected

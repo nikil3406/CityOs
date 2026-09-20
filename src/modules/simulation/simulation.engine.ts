@@ -7,9 +7,8 @@ import { moveVehicles } from "./vehicle_movement.service";
 import {
     updateTrafficLights,
 } from "../traffic/traffic_light.service";
+import { SimulationConfig } from "@/lib/constants";
 
-const SIMULATION_TICK_MS = 3000;
-const SIMULATION_SECONDS_PER_TICK = 1;
 
 class SimulationEngine {
     private timers = new Map<number, NodeJS.Timeout>();
@@ -75,14 +74,14 @@ class SimulationEngine {
 
                 this.stop(simulationId);
             }
-        }, SIMULATION_TICK_MS);
+        }, SimulationConfig.tickIntervalMs);
 
         this.timers.set(simulationId, timer);
 
         console.log(
             `Simulation ${simulationId} started ` +
-            `(${SIMULATION_TICK_MS}ms real time = ` +
-            `${SIMULATION_SECONDS_PER_TICK}s simulation time)`,
+            `(${SimulationConfig.tickIntervalMs}ms real time = ` +
+            `${SimulationConfig.simulationSecondsPerTick}s simulation time)`,
         );
     }
 
