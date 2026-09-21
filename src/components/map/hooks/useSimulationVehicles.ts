@@ -19,27 +19,67 @@ export function useSimulationVehicles(
         }
 
         let cancelled = false;
-        let interval: NodeJS.Timeout | null = null;
-
-        const stopPolling = () => {
-            if (interval) {
-                clearInterval(interval);
-                interval = null;
-
-                console.log(
-                    `Simulation ${simulationId}: vehicle polling stopped.`,
-                );
-            }
-        };
+        let interval: ReturnType<
+            typeof setInterval
+        > | null = null;
 
         async function fetchVehicles() {
             try {
-                const response = await fetch(
-                    `/api/simulation/runs/${simulationId}/vehicles`,
-                    {
-                        cache: "no-store",
-                    },
+                /*
+                 * First check the simulation status.
+                 */
+                const simulationResponse =
+                    await fetch(
+                        `/api/simulation/runs/${simulationId}`,
+                        {
+                            cache: "no-store",
+                        },
+                    );
+
+                if (!simulationResponse.ok) {
+                    throw new Error(
+                        `Failed to fetch simulation: ${simulationResponse.status}`,
+                    );
+                }
+
+                const simulation =
+                    await simulationResponse.json();
+
+                console.log(
+                    `Simulation ${simulationId} status:`,
+                    simulation.status,
                 );
+
+                /*
+                 * Simulation has stopped.
+                 */
+                if (
+                    simulation.status !==
+                    "RUNNING"
+                ) {
+                    if (!cancelled) {
+                        setVehicles([]);
+                    }
+
+                    if (interval !== null) {
+                        clearInterval(interval);
+                        interval = null;
+                    }
+
+                    return;
+                }
+
+                /*
+                 * Simulation is running.
+                 * Fetch vehicle positions.
+                 */
+                const response =
+                    await fetch(
+                        `/api/simulation/runs/${simulationId}/vehicles`,
+                        {
+                            cache: "no-store",
+                        },
+                    );
 
                 if (!response.ok) {
                     throw new Error(
@@ -47,30 +87,35 @@ export function useSimulationVehicles(
                     );
                 }
 
-                const data = await response.json();
+                const data =
+                    await response.json();
 
                 const vehicleData =
                     Array.isArray(data)
                         ? data
                         : data.vehicles ?? [];
 
-                if (cancelled) return;
+                if (cancelled) {
+                    return;
+                }
 
                 const activeVehicles =
                     vehicleData.filter(
-                        (vehicle: SimulationVehicle) =>
-                            vehicle.status !== "COMPLETED",
+                        (
+                            vehicle: SimulationVehicle,
+                        ) =>
+                            vehicle.status !==
+                            "COMPLETED",
                     );
 
-                setVehicles(activeVehicles);
-
-                /*
-                 * No active vehicles remain.
-                 */
-                if (activeVehicles.length === 0) {
-                    stopPolling();
-                }
+                setVehicles(
+                    activeVehicles,
+                );
             } catch (error) {
+                if (cancelled) {
+                    return;
+                }
+
                 console.error(
                     "Failed to fetch simulation vehicles:",
                     error,
@@ -79,12 +124,12 @@ export function useSimulationVehicles(
         }
 
         /*
-         * Fetch immediately.
+         * Initial request.
          */
         fetchVehicles();
 
         /*
-         * Continue polling while vehicles exist.
+         * Poll while simulation is active.
          */
         interval = setInterval(
             fetchVehicles,
@@ -94,7 +139,7 @@ export function useSimulationVehicles(
         return () => {
             cancelled = true;
 
-            if (interval) {
+            if (interval !== null) {
                 clearInterval(interval);
             }
         };

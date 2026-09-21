@@ -3,7 +3,10 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { trafficLights } from "@/db/schema";
 
-import { getTrafficLightPhase } from "./traffic_light_phase.service";
+import {
+    getTrafficLightPhase,
+    getTrafficLightPhases,
+} from "./traffic_light_phase.service";
 
 export async function getTrafficLight(
     trafficLightId: number,
@@ -100,15 +103,22 @@ export async function updateTrafficLight(
      * currently working behavior.
      */
     const nextPhase =
-        light.currentPhase >= 4
-            ? 1
-            : light.currentPhase + 1;
+        await getNextTrafficLightPhase(
+            light.id,
+            light.currentPhase,
+        );
+
+    if (!nextPhase) {
+        throw new Error(
+            `No phases configured for traffic light ${light.id}`,
+        );
+    }
 
     const result = await db
         .update(trafficLights)
         .set({
             currentPhase:
-                nextPhase,
+                nextPhase.phaseNumber,
             phaseElapsed: 0,
             updatedAt:
                 new Date(),
@@ -122,6 +132,37 @@ export async function updateTrafficLight(
         .returning();
 
     return result[0];
+}
+
+async function getNextTrafficLightPhase(
+    trafficLightId: number,
+    currentPhase: number,
+) {
+    const phases =
+        await getTrafficLightPhases(
+            trafficLightId,
+        );
+
+    if (phases.length === 0) {
+        return null;
+    }
+
+    const currentIndex =
+        phases.findIndex(
+            (phase) =>
+                phase.phaseNumber ===
+                currentPhase,
+        );
+
+    if (currentIndex === -1) {
+        return phases[0];
+    }
+
+    const nextIndex =
+        (currentIndex + 1) %
+        phases.length;
+
+    return phases[nextIndex];
 }
 
 export async function updateTrafficLights(
