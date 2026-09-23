@@ -3,11 +3,15 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
     vehicles,
-    roadSegments,
     vehicleRoutes,
 } from "@/db/schema";
 
-import { SimulationConfig } from "@/lib/constants";
+import {
+    setSimulationVehicleStates,
+    getSimulationVehicleStates,
+    getSimulationVehicleState,
+    updateSimulationVehicleState,
+} from "./vehicle_state.service";
 
 import {
     getMovementSignal,
@@ -17,11 +21,18 @@ import {
     checkVehicleAhead,
 } from "@/modules/vehicle/vehicle_following.service";
 
+import { SimulationConfig } from "@/lib/constants";
+
+import {
+    loadSimulationVehicleCache,
+    type SimulationVehicleCache,
+} from "@/modules/vehicle/vehicle_simulation_cache.service";
+
 type VehicleMovementRow = {
     id: number;
     currentSegmentId: number | null;
     simulationRunId: number;
-    destinationIntersectionId: number|null;
+    destinationIntersectionId: number | null;
     routeSequence: number;
     speedKmh: number;
     progress: number;
@@ -33,7 +44,7 @@ type VehicleMovementRow = {
  * Get the remaining physical distance from the vehicle
  * to the end of the current segment.
  *
- * `progress` is logical traversal progress:
+ * progress is logical traversal progress:
  *
  *     0 → vehicle just entered segment
  *     1 → vehicle reached end of segment
@@ -75,84 +86,19 @@ function getGeometryProgress(
 }
 
 /*
- * Get the route entry immediately after the
- * vehicle's current route sequence.
- */
-async function getNextRoute(
-    vehicleId: number,
-    currentRouteSequence: number,
-) {
-    const rows = await db
-        .select({
-            segmentId:
-                vehicleRoutes.segmentId,
-
-            sequence:
-                vehicleRoutes.sequence,
-
-            isReverse:
-                vehicleRoutes.isReverse,
-        })
-        .from(vehicleRoutes)
-        .where(
-            and(
-                eq(
-                    vehicleRoutes.vehicleId,
-                    vehicleId,
-                ),
-
-                eq(
-                    vehicleRoutes.sequence,
-                    currentRouteSequence + 1,
-                ),
-            ),
-        )
-        .limit(1);
-
-    return rows[0] ?? null;
-}
-
-/*
- * Get a road segment by ID.
- */
-async function getRoadSegment(
-    segmentId: number,
-) {
-    const rows = await db
-        .select({
-            id:
-                roadSegments.id,
-
-            roadId:
-                roadSegments.roadId,
-
-            lengthMeters:
-                roadSegments.lengthMeters,
-
-            startIntersectionId:
-                roadSegments.startIntersectionId,
-
-            endIntersectionId:
-                roadSegments.endIntersectionId,
-        })
-        .from(roadSegments)
-        .where(
-            eq(
-                roadSegments.id,
-                segmentId,
-            ),
-        )
-        .limit(1);
-
-    return rows[0] ?? null;
-}
-
-/*
  * Update a vehicle's segment, progress,
  * position, speed and status.
+ *
+ * PostgreSQL remains the persistent store.
+ *
+ * The in-memory vehicle state is updated
+ * at the same time so that other simulation
+ * calculations can use RAM instead of querying
+ * PostgreSQL again.
  */
 async function updateVehiclePosition(
     vehicleId: number,
+    simulationRunId: number,
     segmentId: number,
     routeSequence: number,
     progress: number,
@@ -166,6 +112,9 @@ async function updateVehiclePosition(
             isReverse,
         );
 
+    /*
+     * Persist the state to PostgreSQL.
+     */
     await db.execute(sql`
         UPDATE vehicles
         SET
@@ -201,6 +150,40 @@ async function updateVehiclePosition(
         WHERE id =
             ${vehicleId};
     `);
+
+    /*
+     * Update the in-memory simulation state.
+     */
+    const vehicleState =
+        getSimulationVehicleState(
+            simulationRunId,
+            vehicleId,
+        );
+
+    if (vehicleState) {
+        vehicleState.currentSegmentId =
+            segmentId;
+
+        vehicleState.routeSequence =
+            routeSequence;
+
+        vehicleState.progress =
+            progress;
+
+        vehicleState.speedKmh =
+            speedKmh;
+
+        vehicleState.status =
+            status;
+
+        vehicleState.isReverse =
+            isReverse;
+
+        updateSimulationVehicleState(
+            simulationRunId,
+            vehicleState,
+        );
+    }
 }
 
 /*
@@ -226,11 +209,11 @@ async function checkTrafficLight(
     const approachingIntersectionId =
         isReverse
             ? Number(
-                currentSegment.startIntersectionId,
-            )
+                  currentSegment.startIntersectionId,
+              )
             : Number(
-                currentSegment.endIntersectionId,
-            );
+                  currentSegment.endIntersectionId,
+              );
 
     const signal =
         await getMovementSignal(
@@ -279,11 +262,11 @@ async function stopAtTrafficLight(
         Math.max(
             0,
             1 -
-            (
-                SimulationConfig
-                    .trafficLightStopDistanceMeters /
-                segmentLengthMeters
-            ),
+                (
+                    SimulationConfig
+                        .trafficLightStopDistanceMeters /
+                    segmentLengthMeters
+                ),
         );
 
     /*
@@ -303,6 +286,7 @@ async function stopAtTrafficLight(
 
     await updateVehiclePosition(
         vehicle.id,
+        vehicle.simulationRunId,
         segmentId,
         vehicle.routeSequence,
         stoppedProgress,
@@ -310,6 +294,25 @@ async function stopAtTrafficLight(
         speedKmh,
         "WAITING_AT_SIGNAL",
     );
+
+    /*
+     * Keep the object passed into moveVehicle()
+     * synchronized immediately.
+     */
+    vehicle.currentSegmentId =
+        segmentId;
+
+    vehicle.progress =
+        stoppedProgress;
+
+    vehicle.speedKmh =
+        speedKmh;
+
+    vehicle.status =
+        "WAITING_AT_SIGNAL";
+
+    vehicle.isReverse =
+        isReverse;
 
     console.log(
         `Vehicle ${vehicle.id}: ` +
@@ -342,7 +345,9 @@ async function stopAtTrafficLight(
  */
 async function moveVehicle(
     vehicle: VehicleMovementRow,
+    cache: SimulationVehicleCache,
 ): Promise<boolean> {
+
     if (
         vehicle.currentSegmentId === null
     ) {
@@ -350,7 +355,7 @@ async function moveVehicle(
     }
 
     let currentSegment =
-        await getRoadSegment(
+        cache.segments.get(
             Number(
                 vehicle.currentSegmentId,
             ),
@@ -397,9 +402,10 @@ async function moveVehicle(
 
     /*
      * Re-evaluate the current segment after every
-     * segment transition. This is important because
-     * the vehicle ahead can change when the vehicle
-     * enters a new segment.
+     * segment transition.
+     *
+     * This is important because the vehicle ahead
+     * can change when the vehicle enters a new segment.
      */
     while (
         remainingMovementMeters > 0
@@ -419,30 +425,34 @@ async function moveVehicle(
          * Find the next route entry before checking
          * following/traffic lights.
          */
-        const nextRoute =
-            await getNextRoute(
-                vehicle.id,
-                vehicle.routeSequence,
+        const vehicleRoutesCache =
+            cache.routesByVehicle.get(
+                Number(vehicle.id),
             );
 
+        const nextRoute =
+            vehicleRoutesCache?.get(
+                Number(
+                    vehicle.routeSequence,
+                ) + 1,
+            ) ?? null;
+
         /*
- * ------------------------------------------------
- * DESTINATION ALREADY REACHED
- *
- * If the vehicle is already at the end of its
- * final route segment, complete it before
- * vehicle-following or traffic-light logic
- * can keep it in WAITING.
- * ------------------------------------------------
- */
+         * DESTINATION ALREADY REACHED
+         *
+         * If the vehicle is already at the end of its
+         * final route segment, complete it before
+         * vehicle-following or traffic-light logic
+         * can keep it in WAITING.
+         */
         const destinationIntersection =
             isReverse
                 ? Number(
-                    currentSegment.startIntersectionId,
-                )
+                      currentSegment.startIntersectionId,
+                  )
                 : Number(
-                    currentSegment.endIntersectionId,
-                );
+                      currentSegment.endIntersectionId,
+                  );
 
         const hasReachedDestination =
             currentProgress >= 1 &&
@@ -452,13 +462,14 @@ async function moveVehicle(
             ) &&
             vehicle.destinationIntersectionId !== null &&
             destinationIntersection ===
-            Number(
-                vehicle.destinationIntersectionId,
-            );
+                Number(
+                    vehicle.destinationIntersectionId,
+                );
 
         if (hasReachedDestination) {
             await updateVehiclePosition(
                 vehicle.id,
+                vehicle.simulationRunId,
                 currentSegment.id,
                 vehicle.routeSequence,
                 1,
@@ -466,6 +477,9 @@ async function moveVehicle(
                 Number(vehicle.speedKmh),
                 "COMPLETED",
             );
+
+            vehicle.progress = 1;
+            vehicle.status = "COMPLETED";
 
             console.log(
                 `Vehicle ${vehicle.id}: ` +
@@ -475,12 +489,16 @@ async function moveVehicle(
 
             return true;
         }
+
         /*
          * Vehicle following must be calculated for
          * the CURRENT segment on every loop iteration.
+         *
+         * checkVehicleAhead() now reads from the
+         * in-memory vehicle state cache.
          */
         const following =
-            await checkVehicleAhead(
+            checkVehicleAhead(
                 vehicle.id,
                 vehicle.simulationRunId,
                 Number(
@@ -513,7 +531,7 @@ async function moveVehicle(
                 Math.max(
                     0,
                     following.distanceMeters -
-                    safeDistanceMeters,
+                        safeDistanceMeters,
                 );
 
             /*
@@ -531,6 +549,25 @@ async function moveVehicle(
                     WHERE id =
                         ${vehicle.id};
                 `);
+
+                vehicle.status =
+                    "WAITING";
+
+                const vehicleState =
+                    getSimulationVehicleState(
+                        vehicle.simulationRunId,
+                        vehicle.id,
+                    );
+
+                if (vehicleState) {
+                    vehicleState.status =
+                        "WAITING";
+
+                    updateSimulationVehicleState(
+                        vehicle.simulationRunId,
+                        vehicleState,
+                    );
+                }
 
                 console.log(
                     `Vehicle ${vehicle.id}: ` +
@@ -568,9 +605,7 @@ async function moveVehicle(
         }
 
         /*
-         * ------------------------------------------------
          * DESTINATION SEGMENT
-         * ------------------------------------------------
          *
          * There is no intersection to cross after
          * this segment.
@@ -585,6 +620,7 @@ async function moveVehicle(
             ) {
                 await updateVehiclePosition(
                     vehicle.id,
+                    vehicle.simulationRunId,
                     currentSegment.id,
                     vehicle.routeSequence,
                     1,
@@ -592,6 +628,9 @@ async function moveVehicle(
                     normalSpeedKmh,
                     "COMPLETED",
                 );
+
+                vehicle.progress = 1;
+                vehicle.status = "COMPLETED";
 
                 console.log(
                     `Vehicle ${vehicle.id} ` +
@@ -607,6 +646,7 @@ async function moveVehicle(
 
             await updateVehiclePosition(
                 vehicle.id,
+                vehicle.simulationRunId,
                 currentSegment.id,
                 vehicle.routeSequence,
                 currentProgress,
@@ -614,6 +654,12 @@ async function moveVehicle(
                 normalSpeedKmh,
                 "WAITING",
             );
+
+            vehicle.progress =
+                currentProgress;
+
+            vehicle.status =
+                "WAITING";
 
             return true;
         }
@@ -625,7 +671,7 @@ async function moveVehicle(
          * current road → next road.
          */
         const nextSegment =
-            await getRoadSegment(
+            cache.segments.get(
                 Number(
                     nextRoute.segmentId,
                 ),
@@ -643,9 +689,7 @@ async function moveVehicle(
         }
 
         /*
-         * ------------------------------------------------
          * VEHICLE REMAINS ON CURRENT SEGMENT
-         * ------------------------------------------------
          */
         if (
             allowedMovementMeters <
@@ -668,7 +712,7 @@ async function moveVehicle(
                 Math.max(
                     0,
                     segmentLengthMeters *
-                    (1 - newProgress),
+                        (1 - newProgress),
                 );
 
             if (
@@ -727,6 +771,7 @@ async function moveVehicle(
 
             await updateVehiclePosition(
                 vehicle.id,
+                vehicle.simulationRunId,
                 currentSegment.id,
                 vehicle.routeSequence,
                 currentProgress,
@@ -735,13 +780,17 @@ async function moveVehicle(
                 "WAITING",
             );
 
+            vehicle.progress =
+                currentProgress;
+
+            vehicle.status =
+                "WAITING";
+
             return true;
         }
 
         /*
-         * ------------------------------------------------
          * VEHICLE REACHES THE INTERSECTION
-         * ------------------------------------------------
          *
          * Before crossing, check the movement signal.
          */
@@ -822,6 +871,12 @@ async function moveVehicle(
                 nextRoute.segmentId,
             );
 
+        vehicle.progress =
+            currentProgress;
+
+        vehicle.isReverse =
+            isReverse;
+
         moved = true;
 
         /*
@@ -834,6 +889,7 @@ async function moveVehicle(
         ) {
             await updateVehiclePosition(
                 vehicle.id,
+                vehicle.simulationRunId,
                 currentSegment.id,
                 vehicle.routeSequence,
                 0,
@@ -848,9 +904,10 @@ async function moveVehicle(
                 `${previousSegmentId} → ` +
                 `${currentSegment.id} | ` +
                 `Direction: ` +
-                `${isReverse
-                    ? "REVERSE"
-                    : "FORWARD"
+                `${
+                    isReverse
+                        ? "REVERSE"
+                        : "FORWARD"
                 } | ` +
                 `Remaining movement: 0.00m`,
             );
@@ -858,15 +915,31 @@ async function moveVehicle(
             return true;
         }
 
+        /*
+         * Persist the segment transition to the DB
+         * and RAM before the next loop iteration.
+         */
+        await updateVehiclePosition(
+            vehicle.id,
+            vehicle.simulationRunId,
+            currentSegment.id,
+            vehicle.routeSequence,
+            0,
+            isReverse,
+            normalSpeedKmh,
+            "WAITING",
+        );
+
         console.log(
             `Vehicle ${vehicle.id}: ` +
             `Segment ` +
             `${previousSegmentId} → ` +
             `${currentSegment.id} | ` +
             `Direction: ` +
-            `${isReverse
-                ? "REVERSE"
-                : "FORWARD"
+            `${
+                isReverse
+                    ? "REVERSE"
+                    : "FORWARD"
             } | ` +
             `Remaining movement: ` +
             `${remainingMovementMeters.toFixed(2)}m`,
@@ -879,6 +952,16 @@ async function moveVehicle(
 export async function moveVehicles(
     simulationRunId: number,
 ): Promise<number> {
+
+    /*
+     * Load static route and segment information
+     * into the simulation cache.
+     */
+    const cache =
+        await loadSimulationVehicleCache(
+            simulationRunId,
+        );
+
     /*
      * Get all vehicles that can currently be
      * processed by the simulation.
@@ -954,15 +1037,112 @@ export async function moveVehicles(
             ),
         );
 
-    let movedVehicles = 0;
+    /*
+     * Initialize the in-memory state only once.
+     *
+     * Subsequent ticks use the same objects so
+     * vehicle-following can operate entirely
+     * from RAM.
+     */
+    const existingStates =
+        getSimulationVehicleStates(
+            simulationRunId,
+        );
+
+    if (existingStates.size === 0) {
+        setSimulationVehicleStates(
+            simulationRunId,
+            vehicleRows.map((vehicle) => ({
+                id: Number(vehicle.id),
+
+                simulationRunId:
+                    Number(
+                        vehicle.simulationRunId,
+                    ),
+
+                currentSegmentId:
+                    vehicle.currentSegmentId === null
+                        ? null
+                        : Number(
+                              vehicle.currentSegmentId,
+                          ),
+
+                destinationIntersectionId:
+                    vehicle.destinationIntersectionId ===
+                    null
+                        ? null
+                        : Number(
+                              vehicle.destinationIntersectionId,
+                          ),
+
+                routeSequence:
+                    Number(
+                        vehicle.routeSequence,
+                    ),
+
+                speedKmh:
+                    Number(
+                        vehicle.speedKmh,
+                    ),
+
+                progress:
+                    Number(
+                        vehicle.progress,
+                    ),
+
+                status:
+                    vehicle.status,
+
+                isReverse:
+                    Boolean(
+                        vehicle.isReverse,
+                    ),
+            })),
+        );
+    }
 
     /*
-     * Process every vehicle independently.
+     * IMPORTANT:
+     *
+     * Process the in-memory vehicle state rather
+     * than rebuilding the vehicle object from
+     * PostgreSQL on every tick.
      */
-    for (const vehicle of vehicleRows) {
+    const vehicleStates =
+        getSimulationVehicleStates(
+            simulationRunId,
+        );
+
+    let movedVehicles = 0;
+
+    for (
+        const vehicleState
+        of vehicleStates.values()
+    ) {
+        /*
+         * Only vehicles that can currently move
+         * should enter the movement engine.
+         */
+        if (
+            vehicleState.status !==
+                "WAITING" &&
+            vehicleState.status !==
+                "WAITING_AT_SIGNAL"
+        ) {
+            continue;
+        }
+
+        /*
+         * VehicleMovementRow is structurally
+         * compatible with SimulationVehicleState.
+         */
+        const vehicle =
+            vehicleState as VehicleMovementRow;
+
         const moved =
             await moveVehicle(
                 vehicle,
+                cache,
             );
 
         if (moved) {

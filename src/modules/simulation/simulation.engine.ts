@@ -3,12 +3,15 @@ import {
     getSimulationRun,
 } from "./simulation.service";
 
-import { moveVehicles } from "./vehicle_movement.service";
+import { moveVehicles } from "../vehicle/vehicle_movement.service";
 import {
     updateTrafficLights,
 } from "../traffic/traffic_light.service";
 import { SimulationConfig } from "@/lib/constants";
 
+import {
+    clearSimulationVehicleCache,
+} from "../vehicle/vehicle_simulation_cache.service";
 
 class SimulationEngine {
     private timers = new Map<number, NodeJS.Timeout>();
@@ -90,11 +93,22 @@ class SimulationEngine {
             this.timers.get(simulationId);
 
         if (!timer) {
+            clearSimulationVehicleCache(
+                simulationId,
+            );
+
             return;
         }
 
         clearInterval(timer);
-        this.timers.delete(simulationId);
+
+        this.timers.delete(
+            simulationId,
+        );
+
+        clearSimulationVehicleCache(
+            simulationId,
+        );
 
         console.log(
             `Simulation ${simulationId} engine stopped`,

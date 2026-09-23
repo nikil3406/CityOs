@@ -7,7 +7,7 @@ import {
     vehicles,
 } from "@/db/schema";
 
-import { generateVehicles } from "@/modules/simulation/vehicle.service";
+import { generateVehicles } from "@/modules/vehicle/vehicle.service";
 
 type RouteContext = {
     params: Promise<{ id: string }>;

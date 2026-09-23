@@ -7,18 +7,47 @@ import * as schema from "./schema";
 const connectionString = process.env.DATABASE_URL;
 
 if (!connectionString) {
-  throw new Error("DATABASE_URL is not defined");
+    throw new Error("DATABASE_URL is not defined");
 }
 
-// Prevent multiple connection pools during Next.js hot module reloads in development
 const globalForDb = globalThis as unknown as {
-  conn: postgres.Sql | undefined;
+    conn: postgres.Sql | undefined;
+    queryStats:
+        | {
+              count: number;
+              startedAt: number;
+          }
+        | undefined;
 };
 
-const client = globalForDb.conn ?? postgres(connectionString);
+const queryStats =
+    globalForDb.queryStats ?? {
+        count: 0,
+        startedAt: Date.now(),
+    };
+
+globalForDb.queryStats = queryStats;
+
+const client =
+    globalForDb.conn ??
+    postgres(connectionString, {
+        debug: (
+            _connection,
+            query,
+            parameters,
+        ) => {
+            queryStats.count++;
+
+            console.log(
+                `[DB QUERY #${queryStats.count}]`,
+                query,
+                parameters,
+            );
+        },
+    });
 
 if (process.env.NODE_ENV !== "production") {
-  globalForDb.conn = client;
+    globalForDb.conn = client;
 }
 
 export const db = drizzle(client, { schema });

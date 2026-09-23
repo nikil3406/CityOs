@@ -1,17 +1,7 @@
 import {
-    and,
-    eq,
-    gt,
-    or,
-    sql,
-} from "drizzle-orm";
-
-import { db } from "@/db";
-
-import {
-    vehicles,
-    vehicleRoutes,
-} from "@/db/schema";
+    getSimulationVehicleStates,
+    type SimulationVehicleState,
+} from "@/modules/vehicle/vehicle_state.service";
 
 import { SimulationConfig } from "@/lib/constants";
 
@@ -23,7 +13,7 @@ export type VehicleAheadResult = {
     shouldSlowDown: boolean;
 } | null;
 
-export async function checkVehicleAhead(
+export function checkVehicleAhead(
     vehicleId: number,
     simulationRunId: number,
     currentSegmentId: number,
@@ -31,132 +21,97 @@ export async function checkVehicleAhead(
     currentProgress: number,
     speedKmh: number,
     currentIsReverse: boolean,
-): Promise<VehicleAheadResult> {
-    const rows = await db
-        .select({
-            vehicleId:
-                vehicles.id,
+): VehicleAheadResult {
 
-            progress:
-                vehicles.progress,
+    const vehicleStates =
+        getSimulationVehicleStates(
+            simulationRunId,
+        );
 
-            speedKmh:
-                vehicles.speedKmh,
-        })
-        .from(vehicles)
-        .innerJoin(
-            vehicleRoutes,
-            and(
-                eq(
-                    vehicleRoutes.vehicleId,
-                    vehicles.id,
-                ),
+    let vehicleAhead:
+        SimulationVehicleState | null = null;
 
-                eq(
-                    vehicleRoutes.sequence,
-                    vehicles.routeSequence,
-                ),
-            ),
-        )
-        .where(
-            and(
-                eq(
-                    vehicles.simulationRunId,
-                    simulationRunId,
-                ),
+    let smallestProgressDifference =
+        Number.POSITIVE_INFINITY;
 
-                eq(
-                    vehicles.currentSegmentId,
-                    currentSegmentId,
-                ),
+    for (const vehicle of vehicleStates.values()) {
 
-                eq(
-                    vehicleRoutes.isReverse,
-                    currentIsReverse,
-                ),
+        if (vehicle.id === vehicleId) {
+            continue;
+        }
 
-                /*
-                 * A vehicle that has already completed
-                 * its route is no longer part of traffic.
-                 *
-                 * Without this condition, a completed
-                 * vehicle at progress = 1 can remain in
-                 * the following query and permanently
-                 * block a vehicle behind it.
-                 */
-                sql`
-                    ${vehicles.status}
-                    IN (
-                        'WAITING',
-                        'WAITING_AT_SIGNAL'
-                    )
-                `,
+        if (
+            vehicle.currentSegmentId !==
+            currentSegmentId
+        ) {
+            continue;
+        }
 
-                sql`${vehicles.id} <> ${vehicleId}`,
+        if (
+            vehicle.isReverse !==
+            currentIsReverse
+        ) {
+            continue;
+        }
 
-                /*
-                 * A vehicle is ahead when it has greater
-                 * traversal progress.
-                 *
-                 * If two active vehicles are initialized
-                 * at exactly the same progress, use the
-                 * vehicle ID only as a deterministic
-                 * collision-resolution rule.
-                 *
-                 * Completed vehicles are already excluded
-                 * above, so they can never block a vehicle.
-                 */
-                or(
-                    gt(
-                        vehicles.progress,
-                        currentProgress,
-                    ),
+        if (
+            vehicle.status !== "WAITING" &&
+            vehicle.status !== "WAITING_AT_SIGNAL"
+        ) {
+            continue;
+        }
 
-                    and(
-                        eq(
-                            vehicles.progress,
-                            currentProgress,
-                        ),
+        /*
+         * Vehicles at exactly the same progress are
+         * ordered by vehicle ID to avoid both vehicles
+         * considering each other as the vehicle ahead.
+         */
+        const isAhead =
+            vehicle.progress > currentProgress ||
+            (
+                vehicle.progress === currentProgress &&
+                vehicle.id > vehicleId
+            );
 
-                        gt(
-                            vehicles.id,
-                            vehicleId,
-                        ),
-                    ),
-                ),
-            ),
-        )
-        .orderBy(
-            vehicles.progress,
-        )
-        .limit(1);
+        if (!isAhead) {
+            continue;
+        }
 
-    if (rows.length === 0) {
+        const progressDifference =
+            vehicle.progress -
+            currentProgress;
+
+        if (
+            progressDifference <
+            smallestProgressDifference
+        ) {
+            smallestProgressDifference =
+                progressDifference;
+
+            vehicleAhead = vehicle;
+        }
+    }
+
+    if (!vehicleAhead) {
         return null;
     }
 
-    const vehicleAhead =
-        rows[0];
-
-    const progressDifference =
-        Number(
-            vehicleAhead.progress,
-        ) -
-        currentProgress;
-
-    const distanceMeters =
-        Math.max(
-            0,
-            progressDifference *
-            segmentLengthMeters,
-        );
+    const distanceMeters = Math.max(
+        0,
+        (
+            vehicleAhead.progress -
+            currentProgress
+        ) * segmentLengthMeters,
+    );
 
     const safeDistanceMeters =
-        SimulationConfig.vehicleFollowing
+        SimulationConfig
+            .vehicleFollowing
             .safeDistanceMeters;
 
     const detectionDistanceMeters =
-        SimulationConfig.vehicleFollowing
+        SimulationConfig
+            .vehicleFollowing
             .detectionDistanceMeters;
 
     const shouldStop =
@@ -169,20 +124,10 @@ export async function checkVehicleAhead(
         !shouldStop;
 
     return {
-        vehicleId:
-            Number(
-                vehicleAhead.vehicleId,
-            ),
-
+        vehicleId: vehicleAhead.id,
         distanceMeters,
-
-        speedKmh:
-            Number(
-                vehicleAhead.speedKmh,
-            ),
-
+        speedKmh: vehicleAhead.speedKmh,
         shouldStop,
-
         shouldSlowDown,
     };
 }
