@@ -80,7 +80,7 @@ export default function CityMap({
      * We will later replace this with
      * a simulation selected from the dashboard.
      */
-    const simulationId = 25;
+    const simulationId = 40;
 
     /*
      * Fetch simulation vehicle positions

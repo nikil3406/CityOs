@@ -11,6 +11,7 @@ import {
 export type CachedRoadSegment = {
     id: number;
     roadId: number;
+    speedLimitKmh: number | null;
     lengthMeters: number;
     startIntersectionId: number;
     endIntersectionId: number;
@@ -183,6 +184,9 @@ export async function loadSimulationVehicleCache(
                     roadId:
                         roadSegments.roadId,
 
+                    speedLimitKmh:
+                        roadSegments.speedLimitKmh,
+
                     lengthMeters:
                         roadSegments.lengthMeters,
 
@@ -218,6 +222,11 @@ export async function loadSimulationVehicleCache(
                         Number(
                             segment.roadId,
                         ),
+
+                    speedLimitKmh:
+                        segment.speedLimitKmh !== null
+                            ? Number(segment.speedLimitKmh)
+                            : null,
 
                     lengthMeters:
                         Number(

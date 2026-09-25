@@ -6,11 +6,14 @@ import { cities, simulationRuns } from "@/db/schema";
 
 export async function POST(request: Request) {
     try {
-        const body = (await request.json()) as {
-            cityId?: number;
-        };
+        let body: { cityId?: number } = {};
+        try {
+            body = (await request.json()) as { cityId?: number };
+        } catch {
+            body = {};
+        }
 
-        const { cityId } = body;
+        const cityId = body.cityId ?? 1;
 
         if (
             typeof cityId !== "number" ||

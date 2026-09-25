@@ -29,6 +29,8 @@ import {
     clearSimulationVehicleCache,
 } from "../vehicle/vehicle_simulation_cache.service";
 
+import { detectTrafficQueues } from "@/modules/traffic/queue.service";
+
 class SimulationEngine {
     private timers =
         new Map<
@@ -87,6 +89,13 @@ class SimulationEngine {
         await initializeSimulationVehicleStates(
             simulationId,
         );
+
+        /*
+         * Always reload traffic-light config from the DB
+         * on simulation start so that any DB changes
+         * (e.g. phase configuration in tests) are picked up.
+         */
+        clearTrafficLightCache(simulation.cityId);
 
         await initializeTrafficLights(
             simulation.cityId,
@@ -150,6 +159,16 @@ class SimulationEngine {
                             await moveVehicles(
                                 simulationId,
                             );
+
+                        const queues =
+                            detectTrafficQueues(simulationId);
+
+                        if (queues.length > 0) {
+                            console.log(
+                                `Simulation ${simulationId}: ` +
+                                `${queues.length} traffic queue(s) detected`
+                            );
+                        }
 
                         console.log(
                             `Simulation ${simulationId}: ` +

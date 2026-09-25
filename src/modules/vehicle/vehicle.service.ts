@@ -181,10 +181,10 @@ export async function generateVehicles(
          */
         const destinationIntersectionId =
             possibleDestinations[
-                Math.floor(
-                    Math.random() *
-                        possibleDestinations.length,
-                )
+            Math.floor(
+                Math.random() *
+                possibleDestinations.length,
+            )
             ];
 
         /*
@@ -305,8 +305,8 @@ export async function generateVehicles(
             firstSegment.speedLimitKmh !==
                 null
                 ? Number(
-                      firstSegment.speedLimitKmh,
-                  )
+                    firstSegment.speedLimitKmh,
+                )
                 : 30;
 
         /*
@@ -314,118 +314,89 @@ export async function generateVehicles(
          * Create vehicle.
          * --------------------------------------------
          */
-        const vehicleResult =
-            await db.execute(sql`
-                INSERT INTO vehicles (
-                    simulation_run_id,
-                    current_road_id,
-                    current_segment_id,
-                    destination_intersection_id,
-                    route_sequence,
-                    position,
-                    speed_kmh,
-                    progress,
-                    status
-                )
-                VALUES (
-                    ${simulationRunId},
-
-                    ${firstSegment.roadId},
-
-                    ${firstSegmentId},
-
-                    ${destinationIntersectionId},
-
-                    0,
-
-                    ST_SetSRID(
-                        ST_GeomFromGeoJSON(
-                            ${JSON.stringify(
-                                geometry,
-                            )}
-                        ),
-                        4326
-                    ),
-
-                    ${speedLimit},
-
-                    0,
-
-                    'WAITING'
-                )
-
-                RETURNING
-                    id,
-
-                    simulation_run_id
-                        AS "simulationRunId",
-
-                    current_road_id
-                        AS "currentRoadId",
-
-                    current_segment_id
-                        AS "currentSegmentId",
-
-                    destination_intersection_id
-                        AS "destinationIntersectionId",
-
-                    route_sequence
-                        AS "routeSequence",
-
-                    speed_kmh
-                        AS "speedKmh",
-
-                    status;
-            `);
-
-        if (
-            vehicleResult.length === 0
-        ) {
-            continue;
-        }
-
-        const vehicle =
-            vehicleResult[0] as unknown as
-                GeneratedVehicle;
-
-        /*
-         * --------------------------------------------
-         * Store the complete calculated route.
-         *
-         * Every route entry now stores:
-         *
-         *     vehicleId
-         *     segmentId
-         *     sequence
-         *     isReverse
-         * --------------------------------------------
-         */
-        await db.insert(
-            vehicleRoutes,
-        ).values(
-            route.segments.map(
-                (
-                    routeSegment,
-                    sequence,
-                ) => ({
-                    vehicleId:
-                        vehicle.id,
-
-                    segmentId:
-                        routeSegment.segmentId,
-
-                    sequence,
-
-                    isReverse:
-                        routeSegment.isReverse,
-                }),
+        const vehicle = await db.transaction(async (tx) => {
+            /*
+             * Create the vehicle and its initial state.
+             *
+             * routeSequence = 0 because the first route
+             * entry also uses sequence = 0.
+             */
+            const vehicleResult = await tx.execute(sql`
+        INSERT INTO vehicles (
+            simulation_run_id,
+            current_road_id,
+            current_segment_id,
+            destination_intersection_id,
+            route_sequence,
+            position,
+            speed_kmh,
+            progress,
+            status
+        )
+        VALUES (
+            ${simulationRunId},
+            ${firstSegment.roadId},
+            ${firstSegmentId},
+            ${destinationIntersectionId},
+            0,
+            ST_SetSRID(
+                ST_GeomFromGeoJSON(
+                    ${JSON.stringify(geometry)}
+                ),
+                4326
             ),
-        );
+            ${speedLimit},
+            0,
+            'WAITING'
+        )
+        RETURNING
+            id,
+            simulation_run_id AS "simulationRunId",
+            current_road_id AS "currentRoadId",
+            current_segment_id AS "currentSegmentId",
+            destination_intersection_id AS "destinationIntersectionId",
+            route_sequence AS "routeSequence",
+            speed_kmh AS "speedKmh",
+            status;
+    `);
 
-        generatedVehicles.push(
-            vehicle,
-        );
+            if (vehicleResult.length === 0) {
+                throw new Error(
+                    `Failed to create vehicle for segment ${firstSegmentId}`,
+                );
+            }
+
+            const vehicle =
+                vehicleResult[0] as unknown as GeneratedVehicle;
+
+            /*
+             * Store the complete route.
+             *
+             * The route is intentionally 0-based:
+             *
+             * 0 → first segment
+             * 1 → second segment
+             * 2 → third segment
+             */
+            await tx.insert(vehicleRoutes).values(
+                route.segments.map(
+                    (routeSegment, sequence) => ({
+                        vehicleId: vehicle.id,
+                        segmentId: routeSegment.segmentId,
+                        sequence,
+                        isReverse: routeSegment.isReverse,
+                    }),
+                ),
+            );
+
+            /*
+             * If either INSERT fails, the entire transaction
+             * is rolled back.
+             */
+            return vehicle;
+        });
+
+        generatedVehicles.push(vehicle);
     }
-
     return generatedVehicles;
 }

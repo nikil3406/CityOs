@@ -1,6 +1,8 @@
 import {
     getCachedTrafficLightsAtIntersection,
     getCachedMovement,
+    getCachedTrafficLightPhase,
+    getCachedTrafficLightPhases,
 } from "./traffic_light_cache.service";
 
 export type TrafficLightDecision = {
@@ -74,12 +76,67 @@ export function getMovementSignal(
     }
 
     /*
-     * Traffic light exists but this movement
-     * is not permitted during the current phase.
+     * Check if this movement is configured in ANY phase
+     * for this traffic light.
      */
+    const phases =
+        getCachedTrafficLightPhases(
+            activeLight.cityId,
+            activeLight.id,
+        );
+
+    let hasMovementInAnyPhase = false;
+
+    for (const phaseNum of phases.keys()) {
+        const m = getCachedMovement(
+            activeLight.cityId,
+            activeLight.id,
+            phaseNum,
+            fromRoadId,
+            toRoadId,
+        );
+
+        if (m) {
+            hasMovementInAnyPhase = true;
+            break;
+        }
+    }
+
+    if (hasMovementInAnyPhase) {
+        /*
+         * Movement is registered but not active during this phase.
+         */
+        return {
+            hasTrafficLight: true,
+            state: "RED",
+            phase: activeLight.currentPhase,
+            trafficLightId: activeLight.id,
+        };
+    }
+
+    /*
+     * Fallback if the movement was not explicitly mapped:
+     * Follow the general phase state so vehicles don't get permanently stuck.
+     */
+    const phase =
+        getCachedTrafficLightPhase(
+            activeLight.cityId,
+            activeLight.id,
+            activeLight.currentPhase,
+        );
+
+    const fallbackState: "GREEN" | "YELLOW" | "RED" =
+        phase?.state === "GREEN" ||
+        phase?.state === "YELLOW" ||
+        phase?.state === "RED"
+            ? (phase.state as "GREEN" | "YELLOW" | "RED")
+            : activeLight.currentPhase % 2 === 1
+                ? "GREEN"
+                : "RED";
+
     return {
         hasTrafficLight: true,
-        state: "RED",
+        state: fallbackState,
         phase: activeLight.currentPhase,
         trafficLightId: activeLight.id,
     };

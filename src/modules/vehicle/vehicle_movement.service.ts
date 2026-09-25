@@ -6,6 +6,7 @@ import {
     getSimulationVehicleStates,
     getSimulationVehicleState,
     updateSimulationVehicleState,
+    initializeSimulationVehicleStates,
 } from "./vehicle_state.service";
 
 import {
@@ -20,6 +21,7 @@ import { SimulationConfig } from "@/lib/constants";
 
 import {
     loadSimulationVehicleCache,
+    clearSimulationVehicleCache,
     type SimulationVehicleCache,
 } from "@/modules/vehicle/vehicle_simulation_cache.service";
 
@@ -27,31 +29,31 @@ type VehicleMovementRow = {
     id: number;
 
     currentSegmentId:
-        number | null;
+    number | null;
 
     simulationRunId:
-        number;
+    number;
 
     cityId:
-        number;
+    number;
 
     destinationIntersectionId:
-        number | null;
+    number | null;
 
     routeSequence:
-        number;
+    number;
 
     speedKmh:
-        number;
+    number;
 
     progress:
-        number;
+    number;
 
     status:
-        string;
+    string;
 
     isReverse:
-        boolean | null;
+    boolean | null;
 };
 
 /*
@@ -94,9 +96,10 @@ function getGeometryProgress(
     progress: number,
     isReverse: boolean,
 ): number {
+    const clampedProgress = Math.max(0, Math.min(1, progress));
     return isReverse
-        ? 1 - progress
-        : progress;
+        ? 1 - clampedProgress
+        : clampedProgress;
 }
 
 /*
@@ -120,9 +123,10 @@ async function updateVehiclePosition(
     speedKmh: number,
     status: string,
 ) {
+    const clampedProgress = Math.max(0, Math.min(1, progress));
     const geometryProgress =
         getGeometryProgress(
-            progress,
+            clampedProgress,
             isReverse,
         );
 
@@ -135,11 +139,17 @@ async function updateVehiclePosition(
             current_segment_id =
                 ${segmentId},
 
+            current_road_id = (
+                SELECT road_id
+                FROM road_segments
+                WHERE id = ${segmentId}
+            ),
+
             route_sequence =
                 ${routeSequence},
 
             progress =
-                ${progress},
+                ${clampedProgress},
 
             speed_kmh =
                 ${speedKmh},
@@ -182,7 +192,7 @@ async function updateVehiclePosition(
             routeSequence;
 
         vehicleState.progress =
-            progress;
+            clampedProgress;
 
         vehicleState.speedKmh =
             speedKmh;
@@ -223,11 +233,11 @@ async function checkTrafficLight(
     const approachingIntersectionId =
         isReverse
             ? Number(
-                  currentSegment.startIntersectionId,
-              )
+                currentSegment.startIntersectionId,
+            )
             : Number(
-                  currentSegment.endIntersectionId,
-              );
+                currentSegment.endIntersectionId,
+            );
 
     const signal =
         getMovementSignal(
@@ -293,7 +303,7 @@ async function stopAtTrafficLight(
         vehicle.routeSequence,
         stoppedProgress,
         isReverse,
-        speedKmh,
+        0,
         "WAITING_AT_SIGNAL",
     );
 
@@ -308,7 +318,7 @@ async function stopAtTrafficLight(
         stoppedProgress;
 
     vehicle.speedKmh =
-        speedKmh;
+        0;
 
     vehicle.status =
         "WAITING_AT_SIGNAL";
@@ -389,10 +399,13 @@ async function moveVehicle(
      * Following and traffic-light constraints
      * can reduce this distance, but never increase it.
      */
+    const segmentSpeedLimit =
+        Number(currentSegment.speedLimitKmh) || 30;
+
     const normalSpeedKmh =
-        Number(
-            vehicle.speedKmh,
-        );
+        Number(vehicle.speedKmh) > 0
+            ? Number(vehicle.speedKmh)
+            : segmentSpeedLimit;
 
     let remainingMovementMeters =
         (
@@ -424,16 +437,24 @@ async function moveVehicle(
             );
 
         /*
-         * Find the next route entry before checking
-         * following/traffic lights.
-         */
+          * Find the next route entry before checking
+          * following/traffic lights.
+          */
         const vehicleRoutesCache =
             cache.routesByVehicle.get(
                 Number(vehicle.id),
             );
 
+        if (!vehicleRoutesCache) {
+            clearSimulationVehicleCache(
+                vehicle.simulationRunId,
+            );
+
+            return false;
+        }
+
         const nextRoute =
-            vehicleRoutesCache?.get(
+            vehicleRoutesCache.get(
                 Number(
                     vehicle.routeSequence,
                 ) + 1,
@@ -447,25 +468,11 @@ async function moveVehicle(
          * vehicle-following or traffic-light logic
          * can keep it in WAITING.
          */
-        const destinationIntersection =
-            isReverse
-                ? Number(
-                    currentSegment.startIntersectionId,
-                )
-                : Number(
-                    currentSegment.endIntersectionId,
-                );
-
         const hasReachedDestination =
             currentProgress >= 1 &&
             (
                 !nextRoute ||
                 nextRoute.segmentId === null
-            ) &&
-            vehicle.destinationIntersectionId !== null &&
-            destinationIntersection ===
-            Number(
-                vehicle.destinationIntersectionId,
             );
 
         if (hasReachedDestination) {
@@ -476,7 +483,7 @@ async function moveVehicle(
                 vehicle.routeSequence,
                 1,
                 isReverse,
-                Number(vehicle.speedKmh),
+                normalSpeedKmh,
                 "COMPLETED",
             );
 
@@ -546,14 +553,15 @@ async function moveVehicle(
                 await db.execute(sql`
                     UPDATE vehicles
                     SET
+                        speed_kmh = 0,
                         status = 'WAITING',
                         updated_at = NOW()
-                    WHERE id =
-                        ${vehicle.id};
+                    WHERE id = ${vehicle.id};
                 `);
 
                 vehicle.status =
                     "WAITING";
+                vehicle.speedKmh = 0;
 
                 const vehicleState =
                     getSimulationVehicleState(
@@ -928,9 +936,9 @@ export async function moveVehicles(
 
     /*
      * Route and road-segment information
-     * is already cached per simulation.
+     * is cached per simulation.
      */
-    const cache =
+    let cache =
         await loadSimulationVehicleCache(
             simulationRunId,
         );
@@ -938,13 +946,22 @@ export async function moveVehicles(
     /*
      * Vehicle state was loaded into RAM
      * when the simulation started.
-     *
-     * NO PostgreSQL vehicle SELECT here.
      */
-    const vehicleStates =
+    let vehicleStates =
         getSimulationVehicleStates(
             simulationRunId,
         );
+
+    if (vehicleStates.size === 0) {
+        await initializeSimulationVehicleStates(
+            simulationRunId,
+        );
+
+        vehicleStates =
+            getSimulationVehicleStates(
+                simulationRunId,
+            );
+    }
 
     let movedVehicles = 0;
 
@@ -958,9 +975,9 @@ export async function moveVehicles(
          */
         if (
             vehicleState.status !==
-                "WAITING" &&
+            "WAITING" &&
             vehicleState.status !==
-                "WAITING_AT_SIGNAL"
+            "WAITING_AT_SIGNAL"
         ) {
             continue;
         }

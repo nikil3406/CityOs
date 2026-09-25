@@ -8,6 +8,9 @@ import {
 } from "@/db/schema";
 
 import { generateVehicles } from "@/modules/vehicle/vehicle.service";
+import { initializeSimulationVehicleStates } from "@/modules/vehicle/vehicle_state.service";
+import { clearSimulationVehicleCache } from "@/modules/vehicle/vehicle_simulation_cache.service";
+import { simulationEngine } from "@/modules/simulation/simulation.engine";
 
 type RouteContext = {
     params: Promise<{ id: string }>;
@@ -76,6 +79,11 @@ export async function POST(
                 count,
             );
 
+        if (simulationEngine.isRunning(simulationId)) {
+            clearSimulationVehicleCache(simulationId);
+            await initializeSimulationVehicleStates(simulationId);
+        }
+
         return NextResponse.json(
             {
                 simulationRunId: simulationId,
@@ -127,6 +135,8 @@ export async function GET(
                     vehicles.currentRoadId,
                 destinationIntersectionId:
                     vehicles.destinationIntersectionId,
+                routeSequence:
+                    vehicles.routeSequence,
                 speedKmh: vehicles.speedKmh,
                 status: vehicles.status,
                 progress: vehicles.progress,
