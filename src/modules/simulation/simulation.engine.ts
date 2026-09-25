@@ -3,83 +3,178 @@ import {
     getSimulationRun,
 } from "./simulation.service";
 
-import { moveVehicles } from "../vehicle/vehicle_movement.service";
 import {
+    initializeSimulationVehicleStates,
+    clearSimulationVehicleStates,
+} from "@/modules/vehicle/vehicle_state.service";
+
+import {
+    moveVehicles,
+} from "@/modules/vehicle/vehicle_movement.service";
+
+import {
+    initializeTrafficLights,
     updateTrafficLights,
-} from "../traffic/traffic_light.service";
-import { SimulationConfig } from "@/lib/constants";
+} from "@/modules/traffic/traffic_light.service";
+
+import {
+    clearTrafficLightCache,
+} from "@/modules/traffic/traffic_light_cache.service";
+
+import {
+    SimulationConfig,
+} from "@/lib/constants";
 
 import {
     clearSimulationVehicleCache,
 } from "../vehicle/vehicle_simulation_cache.service";
 
 class SimulationEngine {
-    private timers = new Map<number, NodeJS.Timeout>();
+    private timers =
+        new Map<
+            number,
+            NodeJS.Timeout
+        >();
 
-    async start(simulationId: number) {
-        if (this.timers.has(simulationId)) {
+    async start(
+        simulationId: number,
+    ) {
+        /*
+         * Prevent starting the same
+         * simulation twice.
+         */
+        if (
+            this.timers.has(
+                simulationId,
+            )
+        ) {
             return;
         }
 
-        const simulation = await getSimulationRun(
-            simulationId,
-        );
+        const simulation =
+            await getSimulationRun(
+                simulationId,
+            );
 
         if (!simulation) {
-            throw new Error("Simulation run not found");
+            throw new Error(
+                "Simulation run not found",
+            );
         }
 
-        if (simulation.status !== "RUNNING") {
+        if (
+            simulation.status !==
+            "RUNNING"
+        ) {
             throw new Error(
                 `Simulation is not RUNNING. Current status: ${simulation.status}`,
             );
         }
 
-        const timer = setInterval(async () => {
-            try {
-                const current =
-                    await getSimulationRun(simulationId);
+        /*
+         * --------------------------------------------------
+         * Initialize high-frequency simulation state.
+         * --------------------------------------------------
+         *
+         * Vehicle state:
+         *     PostgreSQL → RAM
+         *
+         * Traffic lights:
+         *     PostgreSQL → RAM
+         *
+         * These happen once when the simulation starts.
+         */
+        await initializeSimulationVehicleStates(
+            simulationId,
+        );
 
-                if (!current) {
-                    this.stop(simulationId);
-                    return;
-                }
+        await initializeTrafficLights(
+            simulation.cityId,
+        );
 
-                if (current.status !== "RUNNING") {
-                    this.stop(simulationId);
-                    return;
-                }
+        const timer =
+            setInterval(
+                async () => {
+                    try {
+                        const current =
+                            await getSimulationRun(
+                                simulationId,
+                            );
 
-                const updated =
-                    await advanceSimulationTime(
-                        simulationId,
-                    );
+                        if (!current) {
+                            this.stop(
+                                simulationId,
+                            );
 
-                if (updated) {
-                    await updateTrafficLights(
-                        updated.cityId,
-                    );
-                }
+                            return;
+                        }
 
-                const movedVehicles =
-                    await moveVehicles(simulationId);
+                        if (
+                            current.status !==
+                            "RUNNING"
+                        ) {
+                            this.stop(
+                                simulationId,
+                            );
 
-                console.log(
-                    `Simulation ${simulationId}: ` +
-                    `${updated?.simulationTime}s | ` +
-                    `Moved vehicles: ${movedVehicles}`,
-                );
-            } catch (error) {
-                console.error(
-                    `Simulation ${simulationId} tick failed:`,
-                    error,
-                );
+                            return;
+                        }
 
-                this.stop(simulationId);
-            }
-        }, SimulationConfig.tickIntervalMs);
+                        /*
+                         * Advance simulation clock.
+                         */
+                        const updated =
+                            await advanceSimulationTime(
+                                simulationId,
+                            );
 
-        this.timers.set(simulationId, timer);
+                        /*
+                         * Update traffic-light
+                         * runtime state.
+                         *
+                         * This now uses RAM.
+                         */
+                        if (updated) {
+                            await updateTrafficLights(
+                                updated.cityId,
+                            );
+                        }
+
+                        /*
+                         * Move vehicles.
+                         *
+                         * Vehicle discovery now
+                         * comes from RAM.
+                         */
+                        const movedVehicles =
+                            await moveVehicles(
+                                simulationId,
+                            );
+
+                        console.log(
+                            `Simulation ${simulationId}: ` +
+                            `${updated?.simulationTime}s | ` +
+                            `Moved vehicles: ${movedVehicles}`,
+                        );
+                    } catch (error) {
+                        console.error(
+                            `Simulation ${simulationId} tick failed:`,
+                            error,
+                        );
+
+                        this.stop(
+                            simulationId,
+                        );
+                    }
+                },
+                SimulationConfig
+                    .tickIntervalMs,
+            );
+
+        this.timers.set(
+            simulationId,
+            timer,
+        );
 
         console.log(
             `Simulation ${simulationId} started ` +
@@ -88,25 +183,54 @@ class SimulationEngine {
         );
     }
 
-    stop(simulationId: number) {
+    stop(
+        simulationId: number,
+    ) {
         const timer =
-            this.timers.get(simulationId);
+            this.timers.get(
+                simulationId,
+            );
 
         if (!timer) {
             clearSimulationVehicleCache(
                 simulationId,
             );
 
+            clearSimulationVehicleStates(
+                simulationId,
+            );
+
             return;
         }
 
-        clearInterval(timer);
+        clearInterval(
+            timer,
+        );
 
         this.timers.delete(
             simulationId,
         );
 
+        /*
+         * Clear simulation-local caches.
+         */
         clearSimulationVehicleCache(
+            simulationId,
+        );
+
+        clearSimulationVehicleStates(
+            simulationId,
+        );
+
+        /*
+         * Traffic-light cache is city-scoped
+         * in the current single-simulation
+         * architecture.
+         *
+         * We need the simulation information
+         * to know which city to clear.
+         */
+        void this.clearTrafficLightCache(
             simulationId,
         );
 
@@ -115,8 +239,29 @@ class SimulationEngine {
         );
     }
 
-    isRunning(simulationId: number) {
-        return this.timers.has(simulationId);
+    private async clearTrafficLightCache(
+        simulationId: number,
+    ) {
+        const simulation =
+            await getSimulationRun(
+                simulationId,
+            );
+
+        if (!simulation) {
+            return;
+        }
+
+        clearTrafficLightCache(
+            simulation.cityId,
+        );
+    }
+
+    isRunning(
+        simulationId: number,
+    ) {
+        return this.timers.has(
+            simulationId,
+        );
     }
 }
 

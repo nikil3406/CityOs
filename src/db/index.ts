@@ -37,12 +37,6 @@ const client =
             parameters,
         ) => {
             queryStats.count++;
-
-            console.log(
-                `[DB QUERY #${queryStats.count}]`,
-                query,
-                parameters,
-            );
         },
     });
 

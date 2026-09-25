@@ -1,13 +1,8 @@
 import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import {
-    vehicles,
-    vehicleRoutes,
-} from "@/db/schema";
 
 import {
-    setSimulationVehicleStates,
     getSimulationVehicleStates,
     getSimulationVehicleState,
     updateSimulationVehicleState,
@@ -30,14 +25,33 @@ import {
 
 type VehicleMovementRow = {
     id: number;
-    currentSegmentId: number | null;
-    simulationRunId: number;
-    destinationIntersectionId: number | null;
-    routeSequence: number;
-    speedKmh: number;
-    progress: number;
-    status: string;
-    isReverse: boolean | null;
+
+    currentSegmentId:
+        number | null;
+
+    simulationRunId:
+        number;
+
+    cityId:
+        number;
+
+    destinationIntersectionId:
+        number | null;
+
+    routeSequence:
+        number;
+
+    speedKmh:
+        number;
+
+    progress:
+        number;
+
+    status:
+        string;
+
+    isReverse:
+        boolean | null;
 };
 
 /*
@@ -216,27 +230,15 @@ async function checkTrafficLight(
               );
 
     const signal =
-        await getMovementSignal(
+        getMovementSignal(
             approachingIntersectionId,
-
             Number(
                 currentSegment.roadId,
             ),
-
             Number(
                 nextSegment.roadId,
             ),
         );
-
-    console.log(
-        `Vehicle ${vehicleId}: ` +
-        `Intersection ${approachingIntersectionId} | ` +
-        `${currentSegment.roadId} → ` +
-        `${nextSegment.roadId} | ` +
-        `TrafficLight ${signal.trafficLightId ?? "NONE"} | ` +
-        `Phase ${signal.phase ?? "NONE"} | ` +
-        `${signal.state}`,
-    );
 
     return {
         ...signal,
@@ -262,11 +264,11 @@ async function stopAtTrafficLight(
         Math.max(
             0,
             1 -
-                (
-                    SimulationConfig
-                        .trafficLightStopDistanceMeters /
-                    segmentLengthMeters
-                ),
+            (
+                SimulationConfig
+                    .trafficLightStopDistanceMeters /
+                segmentLengthMeters
+            ),
         );
 
     /*
@@ -448,11 +450,11 @@ async function moveVehicle(
         const destinationIntersection =
             isReverse
                 ? Number(
-                      currentSegment.startIntersectionId,
-                  )
+                    currentSegment.startIntersectionId,
+                )
                 : Number(
-                      currentSegment.endIntersectionId,
-                  );
+                    currentSegment.endIntersectionId,
+                );
 
         const hasReachedDestination =
             currentProgress >= 1 &&
@@ -462,9 +464,9 @@ async function moveVehicle(
             ) &&
             vehicle.destinationIntersectionId !== null &&
             destinationIntersection ===
-                Number(
-                    vehicle.destinationIntersectionId,
-                );
+            Number(
+                vehicle.destinationIntersectionId,
+            );
 
         if (hasReachedDestination) {
             await updateVehiclePosition(
@@ -531,7 +533,7 @@ async function moveVehicle(
                 Math.max(
                     0,
                     following.distanceMeters -
-                        safeDistanceMeters,
+                    safeDistanceMeters,
                 );
 
             /*
@@ -712,7 +714,7 @@ async function moveVehicle(
                 Math.max(
                     0,
                     segmentLengthMeters *
-                        (1 - newProgress),
+                    (1 - newProgress),
                 );
 
             if (
@@ -898,20 +900,6 @@ async function moveVehicle(
                 "WAITING",
             );
 
-            console.log(
-                `Vehicle ${vehicle.id}: ` +
-                `Segment ` +
-                `${previousSegmentId} → ` +
-                `${currentSegment.id} | ` +
-                `Direction: ` +
-                `${
-                    isReverse
-                        ? "REVERSE"
-                        : "FORWARD"
-                } | ` +
-                `Remaining movement: 0.00m`,
-            );
-
             return true;
         }
 
@@ -929,21 +917,6 @@ async function moveVehicle(
             normalSpeedKmh,
             "WAITING",
         );
-
-        console.log(
-            `Vehicle ${vehicle.id}: ` +
-            `Segment ` +
-            `${previousSegmentId} → ` +
-            `${currentSegment.id} | ` +
-            `Direction: ` +
-            `${
-                isReverse
-                    ? "REVERSE"
-                    : "FORWARD"
-            } | ` +
-            `Remaining movement: ` +
-            `${remainingMovementMeters.toFixed(2)}m`,
-        );
     }
 
     return moved;
@@ -954,8 +927,8 @@ export async function moveVehicles(
 ): Promise<number> {
 
     /*
-     * Load static route and segment information
-     * into the simulation cache.
+     * Route and road-segment information
+     * is already cached per simulation.
      */
     const cache =
         await loadSimulationVehicleCache(
@@ -963,150 +936,10 @@ export async function moveVehicles(
         );
 
     /*
-     * Get all vehicles that can currently be
-     * processed by the simulation.
+     * Vehicle state was loaded into RAM
+     * when the simulation started.
      *
-     * WAITING:
-     *     normal active vehicle
-     *
-     * WAITING_AT_SIGNAL:
-     *     vehicle stopped at red signal
-     *
-     * WAITING_AT_SIGNAL is selected again
-     * every tick so that it can resume when
-     * the signal changes.
-     */
-    const vehicleRows = await db
-        .select({
-            id:
-                vehicles.id,
-
-            simulationRunId:
-                vehicles.simulationRunId,
-
-            currentSegmentId:
-                vehicles.currentSegmentId,
-
-            routeSequence:
-                vehicles.routeSequence,
-
-            speedKmh:
-                vehicles.speedKmh,
-
-            destinationIntersectionId:
-                vehicles.destinationIntersectionId,
-
-            progress:
-                vehicles.progress,
-
-            status:
-                vehicles.status,
-
-            isReverse:
-                vehicleRoutes.isReverse,
-        })
-        .from(vehicles)
-        .leftJoin(
-            vehicleRoutes,
-            and(
-                eq(
-                    vehicleRoutes.vehicleId,
-                    vehicles.id,
-                ),
-
-                eq(
-                    vehicleRoutes.sequence,
-                    vehicles.routeSequence,
-                ),
-            ),
-        )
-        .where(
-            and(
-                eq(
-                    vehicles.simulationRunId,
-                    simulationRunId,
-                ),
-
-                sql`
-                    ${vehicles.status}
-                    IN (
-                        'WAITING',
-                        'WAITING_AT_SIGNAL'
-                    )
-                `,
-            ),
-        );
-
-    /*
-     * Initialize the in-memory state only once.
-     *
-     * Subsequent ticks use the same objects so
-     * vehicle-following can operate entirely
-     * from RAM.
-     */
-    const existingStates =
-        getSimulationVehicleStates(
-            simulationRunId,
-        );
-
-    if (existingStates.size === 0) {
-        setSimulationVehicleStates(
-            simulationRunId,
-            vehicleRows.map((vehicle) => ({
-                id: Number(vehicle.id),
-
-                simulationRunId:
-                    Number(
-                        vehicle.simulationRunId,
-                    ),
-
-                currentSegmentId:
-                    vehicle.currentSegmentId === null
-                        ? null
-                        : Number(
-                              vehicle.currentSegmentId,
-                          ),
-
-                destinationIntersectionId:
-                    vehicle.destinationIntersectionId ===
-                    null
-                        ? null
-                        : Number(
-                              vehicle.destinationIntersectionId,
-                          ),
-
-                routeSequence:
-                    Number(
-                        vehicle.routeSequence,
-                    ),
-
-                speedKmh:
-                    Number(
-                        vehicle.speedKmh,
-                    ),
-
-                progress:
-                    Number(
-                        vehicle.progress,
-                    ),
-
-                status:
-                    vehicle.status,
-
-                isReverse:
-                    Boolean(
-                        vehicle.isReverse,
-                    ),
-            })),
-        );
-    }
-
-    /*
-     * IMPORTANT:
-     *
-     * Process the in-memory vehicle state rather
-     * than rebuilding the vehicle object from
-     * PostgreSQL on every tick.
+     * NO PostgreSQL vehicle SELECT here.
      */
     const vehicleStates =
         getSimulationVehicleStates(
@@ -1120,8 +953,8 @@ export async function moveVehicles(
         of vehicleStates.values()
     ) {
         /*
-         * Only vehicles that can currently move
-         * should enter the movement engine.
+         * Only vehicles that can currently
+         * participate in movement.
          */
         if (
             vehicleState.status !==
@@ -1132,10 +965,6 @@ export async function moveVehicles(
             continue;
         }
 
-        /*
-         * VehicleMovementRow is structurally
-         * compatible with SimulationVehicleState.
-         */
         const vehicle =
             vehicleState as VehicleMovementRow;
 
