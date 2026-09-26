@@ -279,3 +279,13 @@ export function clearSimulationVehicleCache(
         `vehicle cache cleared`,
     );
 }
+
+export function getSimulationVehicleCache(
+    simulationRunId: number,
+): SimulationVehicleCache | null {
+    return (
+        simulationCaches.get(
+            simulationRunId,
+        ) ?? null
+    );
+}

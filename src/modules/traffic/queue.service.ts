@@ -3,6 +3,10 @@ import {
     type SimulationVehicleState,
 } from "@/modules/vehicle/vehicle_state.service";
 
+import {
+    getSimulationVehicleCache,
+} from "@/modules/vehicle/vehicle_simulation_cache.service";
+
 export type TrafficQueue = {
     simulationRunId: number;
     segmentId: number;
@@ -26,6 +30,15 @@ export function detectTrafficQueues(
             simulationRunId,
         );
 
+    const simulationCache =
+        getSimulationVehicleCache(
+            simulationRunId,
+        );
+
+    if (!simulationCache) {
+        return [];
+    }
+
     const vehiclesBySegment =
         new Map<
             string,
@@ -45,15 +58,26 @@ export function detectTrafficQueues(
 
         if (
             vehicle.status !== "WAITING" &&
-            vehicle.status !== "WAITING_AT_SIGNAL"
+            vehicle.status !==
+                "WAITING_AT_SIGNAL"
         ) {
             continue;
         }
 
+        /*
+         * A vehicle explicitly waiting at
+         * a traffic signal is considered stopped
+         * even if its speed value has not yet
+         * reached zero.
+         *
+         * Ordinary WAITING vehicles must have
+         * effectively stopped.
+         */
         if (
-            vehicle.status !== "WAITING_AT_SIGNAL" &&
+            vehicle.status !==
+                "WAITING_AT_SIGNAL" &&
             vehicle.speedKmh >
-            QUEUE_STOP_SPEED_KMH
+                QUEUE_STOP_SPEED_KMH
         ) {
             continue;
         }
@@ -63,7 +87,8 @@ export function detectTrafficQueues(
             `${vehicle.isReverse}`;
 
         const vehiclesOnSegment =
-            vehiclesBySegment.get(key) ?? [];
+            vehiclesBySegment.get(key) ??
+            [];
 
         vehiclesOnSegment.push(
             vehicle,
@@ -92,13 +117,35 @@ export function detectTrafficQueues(
 
         /*
          * Logical progress increases in the
-         * direction of travel.
+         * direction of travel:
+         *
+         * 0 → beginning of segment
+         * 1 → end of segment
+         *
+         * Therefore the vehicle with the
+         * highest progress is physically ahead.
          */
         vehiclesOnSegment.sort(
             (a, b) =>
                 a.progress -
                 b.progress,
         );
+
+        const [
+            segmentIdString,
+        ] = key.split(":");
+
+        const segmentId =
+            Number(segmentIdString);
+
+        const segment =
+            simulationCache.segments.get(
+                segmentId,
+            );
+
+        if (!segment) {
+            continue;
+        }
 
         let currentQueue:
             SimulationVehicleState[] = [];
@@ -117,6 +164,7 @@ export function detectTrafficQueues(
                 currentQueue = [
                     vehicle,
                 ];
+
                 continue;
             }
 
@@ -126,27 +174,33 @@ export function detectTrafficQueues(
                 ];
 
             /*
-             * We don't yet have segment length
-             * in vehicle state, so use progress
-             * difference as the grouping criterion.
+             * Convert logical progress
+             * difference into physical
+             * distance.
              *
-             * This will be converted to physical
-             * distance when segment metadata is
-             * incorporated into queue metrics.
+             * Example:
+             *
+             * segment = 100m
+             * progress difference = 0.15
+             *
+             * distance = 15m
              */
-            const progressGap =
+            const physicalGap =
                 Math.abs(
                     vehicle.progress -
                     previousVehicle.progress,
-                );
+                ) *
+                segment.lengthMeters;
 
             /*
-             * 20m is intentionally represented
-             * approximately here until segment
-             * length is supplied.
+             * Vehicles are considered part
+             * of the same queue when the physical
+             * gap between consecutive vehicles
+             * is <= 20 meters.
              */
             if (
-                progressGap <= 0.1
+                physicalGap <=
+                QUEUE_MAX_GAP_METERS
             ) {
                 currentQueue.push(
                     vehicle,
@@ -157,6 +211,7 @@ export function detectTrafficQueues(
                     simulationRunId,
                     key,
                     currentQueue,
+                    segment.lengthMeters,
                 );
 
                 currentQueue = [
@@ -170,6 +225,7 @@ export function detectTrafficQueues(
             simulationRunId,
             key,
             currentQueue,
+            segment.lengthMeters,
         );
     }
 
@@ -181,6 +237,7 @@ function addQueue(
     simulationRunId: number,
     key: string,
     vehicles: SimulationVehicleState[],
+    segmentLengthMeters: number,
 ) {
     if (
         vehicles.length <
@@ -193,6 +250,39 @@ function addQueue(
         segmentIdString,
         reverseString,
     ] = key.split(":");
+
+    /*
+     * Vehicles are sorted by increasing
+     * logical progress.
+     *
+     * Therefore:
+     *
+     * highest progress = front
+     * lowest progress  = rear
+     */
+    const frontVehicle =
+        vehicles[
+            vehicles.length - 1
+        ];
+
+    const rearVehicle =
+        vehicles[0];
+
+    /*
+     * Queue length is the physical distance
+     * between the rear-most and front-most
+     * vehicles.
+     *
+     * progress is normalized from 0 → 1,
+     * so multiplying the difference by
+     * segment length gives meters.
+     */
+    const queueLengthMeters =
+        Math.abs(
+            frontVehicle.progress -
+            rearVehicle.progress,
+        ) *
+        segmentLengthMeters;
 
     queues.push({
         simulationRunId,
@@ -213,13 +303,16 @@ function addQueue(
             vehicles.length,
 
         frontVehicleId:
-            vehicles[
-                vehicles.length - 1
-            ].id,
+            frontVehicle.id,
 
         rearVehicleId:
-            vehicles[0].id,
+            rearVehicle.id,
 
-        queueLengthMeters: 0,
+        queueLengthMeters:
+            Number(
+                queueLengthMeters.toFixed(
+                    2,
+                ),
+            ),
     });
 }

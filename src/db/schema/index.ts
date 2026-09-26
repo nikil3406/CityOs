@@ -14,3 +14,4 @@ export { roadSegments } from "./road_segments";
 export { trafficLights } from "./traffic_lights";
 export { trafficLightPhases } from "./traffic_light_phases";
 export { trafficLightMovements } from "./traffic_light_movements";
+export {simulationMetrics} from "./simulation_metrics";

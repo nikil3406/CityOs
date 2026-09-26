@@ -29,7 +29,20 @@ import {
     clearSimulationVehicleCache,
 } from "../vehicle/vehicle_simulation_cache.service";
 
-import { detectTrafficQueues } from "@/modules/traffic/queue.service";
+import {
+    detectTrafficQueues,
+} from "@/modules/traffic/queue.service";
+
+import {
+    getPreviousQueueState,
+    setPreviousQueueState,
+    clearQueueEventState,
+} from "@/modules/traffic/queue_event_state.service";
+
+import {
+    recordSimulationEvent,
+} from "./simulation_event.service";
+
 
 class SimulationEngine {
     private timers =
@@ -37,6 +50,7 @@ class SimulationEngine {
             number,
             NodeJS.Timeout
         >();
+
 
     async start(
         simulationId: number,
@@ -95,7 +109,9 @@ class SimulationEngine {
          * on simulation start so that any DB changes
          * (e.g. phase configuration in tests) are picked up.
          */
-        clearTrafficLightCache(simulation.cityId);
+        clearTrafficLightCache(
+            simulation.cityId,
+        );
 
         await initializeTrafficLights(
             simulation.cityId,
@@ -160,21 +176,98 @@ class SimulationEngine {
                                 simulationId,
                             );
 
+                        /*
+                         * Detect traffic queues
+                         * after vehicle movement.
+                         */
                         const queues =
-                            detectTrafficQueues(simulationId);
-
-                        if (queues.length > 0) {
-                            console.log(
-                                `Simulation ${simulationId}: ` +
-                                `${queues.length} traffic queue(s) detected`
+                            detectTrafficQueues(
+                                simulationId,
                             );
+
+                        const hadQueues =
+                            getPreviousQueueState(
+                                simulationId,
+                            );
+
+                        const hasQueues =
+                            queues.length > 0;
+
+                        if (
+                            !hadQueues &&
+                            hasQueues &&
+                            updated
+                        ) {
+                            await recordSimulationEvent({
+                                simulationRunId:
+                                    simulationId,
+
+                                type:
+                                    "TRAFFIC_QUEUE_STARTED",
+
+                                simulationTime:
+                                    updated.simulationTime,
+
+                                data: {
+                                    queueCount:
+                                        queues.length,
+
+                                    maximumQueueVehicles:
+                                        Math.max(
+                                            ...queues.map(
+                                                (queue) =>
+                                                    queue.vehicleCount,
+                                            ),
+                                        ),
+
+                                    averageQueueLengthMeters:
+                                        queues.reduce(
+                                            (sum, queue) =>
+                                                sum +
+                                                queue.queueLengthMeters,
+                                            0,
+                                        ) / queues.length,
+                                },
+                            });
                         }
+
+                        if (
+                            hadQueues &&
+                            !hasQueues &&
+                            updated
+                        ) {
+                            await recordSimulationEvent({
+                                simulationRunId:
+                                    simulationId,
+
+                                type:
+                                    "TRAFFIC_QUEUE_CLEARED",
+
+                                simulationTime:
+                                    updated.simulationTime,
+                            });
+                        }
+
+                        setPreviousQueueState(
+                            simulationId,
+                            hasQueues,
+                        );
+
+                        /*
+ * Calculate current traffic metrics
+ * from runtime simulation state.
+ *
+ * Metrics are not persisted every tick.
+ * They will be exposed through the
+ * live simulation state API.
+ */
 
                         console.log(
                             `Simulation ${simulationId}: ` +
                             `${updated?.simulationTime}s | ` +
                             `Moved vehicles: ${movedVehicles}`,
                         );
+
                     } catch (error) {
                         console.error(
                             `Simulation ${simulationId} tick failed:`,
@@ -201,6 +294,7 @@ class SimulationEngine {
             `${SimulationConfig.simulationSecondsPerTick}s simulation time)`,
         );
     }
+
 
     stop(
         simulationId: number,
@@ -237,6 +331,10 @@ class SimulationEngine {
             simulationId,
         );
 
+        clearQueueEventState(
+            simulationId,
+        );
+
         clearSimulationVehicleStates(
             simulationId,
         );
@@ -258,6 +356,7 @@ class SimulationEngine {
         );
     }
 
+
     private async clearTrafficLightCache(
         simulationId: number,
     ) {
@@ -275,6 +374,7 @@ class SimulationEngine {
         );
     }
 
+
     isRunning(
         simulationId: number,
     ) {
@@ -283,6 +383,7 @@ class SimulationEngine {
         );
     }
 }
+
 
 export const simulationEngine =
     new SimulationEngine();
