@@ -1,6 +1,8 @@
+"use client";
+
 import { useEffect, useState } from "react";
 
-export type SimulationMetrics = {
+type SimulationMetrics = {
     totalVehicles: number;
     activeVehicles: number;
     completedVehicles: number;
@@ -14,27 +16,11 @@ export type SimulationMetrics = {
     totalDistanceMeters: number;
 };
 
-type SimulationResponse = {
-    simulation: {
-        id: number;
-        cityId: number;
-        status: string;
-        simulationTime: number;
-    };
-    metrics: SimulationMetrics;
-};
-
 export function useSimulationMetrics(
     simulationId: number | null,
 ) {
     const [metrics, setMetrics] =
         useState<SimulationMetrics | null>(null);
-
-    const [simulationStatus, setSimulationStatus] =
-        useState<string>("INACTIVE");
-
-    const [simulationTime, setSimulationTime] =
-        useState(0);
 
     const [loading, setLoading] =
         useState(false);
@@ -42,26 +28,82 @@ export function useSimulationMetrics(
     const [error, setError] =
         useState<string | null>(null);
 
+    const [simulationStatus, setSimulationStatus] =
+        useState<string | null>(null);
+
+    const [simulationTime, setSimulationTime] =
+        useState<number | null>(null);
+
     useEffect(() => {
         if (simulationId === null) {
             setMetrics(null);
-            setSimulationStatus("INACTIVE");
-            setSimulationTime(0);
             return;
         }
 
         let cancelled = false;
+        let interval: NodeJS.Timeout | null = null;
+
+        const stopPolling = () => {
+            if (interval) {
+                clearInterval(interval);
+                interval = null;
+
+                console.log(
+                    `Simulation ${simulationId}: metrics polling stopped.`,
+                );
+            }
+        };
 
         const fetchMetrics = async () => {
             try {
+                /*
+                 * First check whether the simulation
+                 * is still running.
+                 */
+                const simulationResponse =
+                    await fetch(
+                        `/api/simulation/runs/${simulationId}`,
+                        {
+                            cache: "no-store",
+                        },
+                    );
+
+                if (!simulationResponse.ok) {
+                    throw new Error(
+                        "Failed to fetch simulation status",
+                    );
+                }
+
+                const simulation =
+                    await simulationResponse.json();
+
+                if (cancelled) {
+                    return;
+                }
+
+                setSimulationStatus(simulation.status);
+                setSimulationTime(simulation.simulationTime);
+
+                /*
+                 * Simulation has stopped.
+                 *
+                 * Keep the last metrics visible,
+                 * but stop making further requests.
+                 */
+                if (simulation.status !== "RUNNING") {
+                    stopPolling();
+                    return;
+                }
+
                 setLoading(true);
 
-                const response = await fetch(
-                    `/api/simulation/runs/${simulationId}/metrics`,
-                    {
-                        cache: "no-store",
-                    },
-                );
+                const response =
+                    await fetch(
+                        `/api/simulation/runs/${simulationId}/metrics`,
+                        {
+                            cache: "no-store",
+                        },
+                    );
 
                 if (!response.ok) {
                     throw new Error(
@@ -69,7 +111,7 @@ export function useSimulationMetrics(
                     );
                 }
 
-                const data: SimulationResponse =
+                const data =
                     await response.json();
 
                 if (cancelled) {
@@ -77,12 +119,6 @@ export function useSimulationMetrics(
                 }
 
                 setMetrics(data.metrics);
-                setSimulationStatus(
-                    data.simulation.status,
-                );
-                setSimulationTime(
-                    data.simulation.simulationTime,
-                );
                 setError(null);
             } catch (error) {
                 if (cancelled) {
@@ -104,24 +140,35 @@ export function useSimulationMetrics(
             }
         };
 
+        /*
+         * Fetch immediately.
+         */
         fetchMetrics();
 
-        const interval = setInterval(
+        /*
+         * Continue while simulation is RUNNING.
+         * fetchMetrics() will remove this interval
+         * once the simulation stops.
+         */
+        interval = setInterval(
             fetchMetrics,
             1000,
         );
 
         return () => {
             cancelled = true;
-            clearInterval(interval);
+
+            if (interval) {
+                clearInterval(interval);
+            }
         };
     }, [simulationId]);
 
     return {
         metrics,
-        simulationStatus,
-        simulationTime,
         loading,
         error,
+        simulationStatus,
+        simulationTime,
     };
 }

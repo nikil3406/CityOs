@@ -41,6 +41,7 @@ import type {
 
 type CityMapProps = {
     selectedCityId: number;
+    selectedSimulationId: number | null;
     setSelectedCityId: (
         id: number,
     ) => void;
@@ -60,6 +61,7 @@ type CityMapProps = {
 
 export default function CityMap({
     selectedCityId,
+    selectedSimulationId,
     setSelectedCityId,
     visibleLayers,
     cities,
@@ -74,13 +76,6 @@ export default function CityMap({
     loading,
     error,
 }: CityMapProps) {
-    /*
-     * Temporary simulation ID.
-     *
-     * We will later replace this with
-     * a simulation selected from the dashboard.
-     */
-    const simulationId = 52;
 
     /*
      * Fetch simulation vehicle positions
@@ -88,7 +83,7 @@ export default function CityMap({
      */
     const simulationVehicles =
         useSimulationVehicles(
-            simulationId,
+            selectedSimulationId,
         );
 
     const [

@@ -23,6 +23,7 @@ const CityMap = dynamic(
 
 type CityMapClientProps = {
     selectedCityId: number;
+    selectedSimulationId: number | null;
     setSelectedCityId: (
         id: number,
     ) => void;
@@ -45,6 +46,7 @@ type CityMapClientProps = {
 
 export default function CityMapClient({
     selectedCityId,
+    selectedSimulationId,
     setSelectedCityId,
     visibleLayers,
     cities,
@@ -65,6 +67,7 @@ export default function CityMapClient({
             setSelectedCityId={
                 setSelectedCityId
             }
+            selectedSimulationId={selectedSimulationId}
             visibleLayers={visibleLayers}
             cities={cities}
             roads={roads}

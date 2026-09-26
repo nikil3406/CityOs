@@ -43,6 +43,16 @@ import {
     recordSimulationEvent,
 } from "./simulation_event.service";
 
+import {
+    calculateSegmentCongestion,
+} from "@/modules/traffic/congestion.service";
+
+import {
+    getPreviousSevereState,
+    setPreviousSevereState,
+    clearCongestionEventState,
+} from "@/modules/traffic/congestion_event_state.service";
+
 
 class SimulationEngine {
     private timers =
@@ -254,6 +264,151 @@ class SimulationEngine {
                         );
 
                         /*
+ * --------------------------------------------------
+ * Detect severe congestion.
+ *
+ * Congestion is evaluated per road segment.
+ * Only transitions into/out of SEVERE are
+ * recorded as simulation events.
+ * --------------------------------------------------
+ */
+
+                        const congestion =
+                            calculateSegmentCongestion(
+                                simulationId,
+                            );
+
+                        for (const segment of congestion) {
+                            const isSevere =
+                                segment.congestionLevel ===
+                                "SEVERE";
+
+                            const wasSevere =
+                                getPreviousSevereState(
+                                    simulationId,
+                                    segment.segmentId,
+                                );
+
+                            /*
+                             * --------------------------------------------------
+                             * SEVERE CONGESTION STARTED
+                             * --------------------------------------------------
+                             */
+
+                            if (
+                                !wasSevere &&
+                                isSevere &&
+                                updated
+                            ) {
+                                await recordSimulationEvent({
+                                    simulationRunId:
+                                        simulationId,
+
+                                    type:
+                                        "CONGESTION_DETECTED",
+
+                                    roadId:
+                                        segment.roadId,
+
+                                    simulationTime:
+                                        updated.simulationTime,
+
+                                    data: {
+                                        segmentId:
+                                            segment.segmentId,
+
+                                        roadId:
+                                            segment.roadId,
+
+                                        vehicleCount:
+                                            segment.vehicleCount,
+
+                                        averageSpeedKmh:
+                                            segment.averageSpeedKmh,
+
+                                        speedLimitKmh:
+                                            segment.speedLimitKmh,
+
+                                        speedRatio:
+                                            segment.speedRatio,
+
+                                        queueVehicleCount:
+                                            segment.queueVehicleCount,
+
+                                        queueLengthMeters:
+                                            segment.queueLengthMeters,
+
+                                        congestionLevel:
+                                            segment.congestionLevel,
+                                    },
+                                });
+                            }
+
+                            /*
+                             * --------------------------------------------------
+                             * SEVERE CONGESTION CLEARED
+                             * --------------------------------------------------
+                             */
+
+                            if (
+                                wasSevere &&
+                                !isSevere &&
+                                updated
+                            ) {
+                                await recordSimulationEvent({
+                                    simulationRunId:
+                                        simulationId,
+
+                                    type:
+                                        "CONGESTION_CLEARED",
+
+                                    roadId:
+                                        segment.roadId,
+
+                                    simulationTime:
+                                        updated.simulationTime,
+
+                                    data: {
+                                        segmentId:
+                                            segment.segmentId,
+
+                                        roadId:
+                                            segment.roadId,
+
+                                        previousLevel:
+                                            "SEVERE",
+
+                                        currentLevel:
+                                            segment.congestionLevel,
+
+                                        vehicleCount:
+                                            segment.vehicleCount,
+
+                                        averageSpeedKmh:
+                                            segment.averageSpeedKmh,
+
+                                        queueVehicleCount:
+                                            segment.queueVehicleCount,
+
+                                        queueLengthMeters:
+                                            segment.queueLengthMeters,
+                                    },
+                                });
+                            }
+
+                            /*
+                             * Remember the current state for
+                             * the next simulation tick.
+                             */
+
+                            setPreviousSevereState(
+                                simulationId,
+                                segment.segmentId,
+                                isSevere,
+                            );
+                        }
+
+                        /*
  * Calculate current traffic metrics
  * from runtime simulation state.
  *
@@ -336,6 +491,10 @@ class SimulationEngine {
         );
 
         clearSimulationVehicleStates(
+            simulationId,
+        );
+
+        clearCongestionEventState(
             simulationId,
         );
 

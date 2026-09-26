@@ -93,6 +93,9 @@ export default function DashboardPage() {
                                 setSelectedCityId={
                                     setSelectedCityId
                                 }
+                                selectedSimulationId={
+                                    selectedSimulationId
+                                }
                                 visibleLayers={
                                     visibleLayers
                                 }
