@@ -7,6 +7,16 @@ import { useCityMapData } from "@/components/map/hooks/useCityMapData";
 
 import type { VisibleLayers } from "@/components/map/types/map.types";
 
+import SimulationSelector
+    from "@/components/simulation/SimulationSelector";
+
+import {
+    useSimulationMetrics,
+} from "@/components/simulation/useSimulationMetrics";
+
+import SimulationEvents
+    from "@/components/simulation/SimulationEvents";
+
 export default function DashboardPage() {
     const [selectedCityId, setSelectedCityId] =
         useState(1);
@@ -21,6 +31,9 @@ export default function DashboardPage() {
             contours: false,
         });
 
+    const [selectedSimulationId, setSelectedSimulationId] =
+        useState<number | null>(null);
+
     const {
         cities,
         roads,
@@ -34,6 +47,14 @@ export default function DashboardPage() {
         loading,
         error,
     } = useCityMapData(selectedCityId);
+
+    const {
+        metrics,
+        simulationStatus,
+        simulationTime,
+        loading: metricsLoading,
+        error: metricsError,
+    } = useSimulationMetrics(selectedSimulationId);
 
     const toggleLayer = (
         layer: keyof VisibleLayers,
@@ -61,39 +82,47 @@ export default function DashboardPage() {
                 </p>
             </header>
 
-            <div className="grid min-h-[calc(100vh-81px)] grid-cols-1 gap-4 p-4 lg:grid-cols-[1.1fr_1fr]">
-                <section className="h-full min-h-[650px] overflow-hidden rounded-2xl border bg-white shadow-sm">
-                    <div className="h-full w-full">
-                        <CityMapClient
-                            selectedCityId={
-                                selectedCityId
-                            }
-                            setSelectedCityId={
-                                setSelectedCityId
-                            }
-                            visibleLayers={
-                                visibleLayers
-                            }
-                            cities={cities}
-                            roads={roads}
-                            intersections={
-                                intersections
-                            }
-                            buildings={buildings}
-                            trees={trees}
-                            waterAreas={
-                                waterAreas
-                            }
-                            waterLines={
-                                waterLines
-                            }
-                            contours={contours}
-                            boundary={boundary}
-                            loading={loading}
-                            error={error}
-                        />
-                    </div>
-                </section>
+            <div className="grid min-h-[calc(100vh-81px)] grid-cols-1 items-start gap-4 p-4 lg:grid-cols-[1.1fr_1fr]">
+                <div className="flex flex-col gap-4">
+                    <section className="h-[650px] overflow-hidden rounded-2xl border bg-white shadow-sm">
+                        <div className="h-full w-full">
+                            <CityMapClient
+                                selectedCityId={
+                                    selectedCityId
+                                }
+                                setSelectedCityId={
+                                    setSelectedCityId
+                                }
+                                visibleLayers={
+                                    visibleLayers
+                                }
+                                cities={cities}
+                                roads={roads}
+                                intersections={
+                                    intersections
+                                }
+                                buildings={buildings}
+                                trees={trees}
+                                waterAreas={
+                                    waterAreas
+                                }
+                                waterLines={
+                                    waterLines
+                                }
+                                contours={contours}
+                                boundary={boundary}
+                                loading={loading}
+                                error={error}
+                            />
+                        </div>
+                    </section>
+
+                    <SimulationEvents
+                        simulationId={
+                            selectedSimulationId
+                        }
+                    />
+                </div>
 
                 <aside className="grid grid-rows-[auto_auto_1fr] gap-4">
                     {/* CITY OVERVIEW */}
@@ -156,25 +185,118 @@ export default function DashboardPage() {
                     {/* TRAFFIC STATUS */}
                     <section className="rounded-xl border bg-white p-5 shadow-sm">
                         <h2 className="text-lg font-semibold text-slate-800">
-                            Traffic Status
+                            Traffic Simulation
                         </h2>
 
-                        <div className="mt-4 flex items-center gap-3 rounded-lg bg-slate-50 p-4">
-                            <div className="h-3 w-3 rounded-full bg-green-500" />
+                        <div className="mt-4">
+                            <SimulationSelector
+                                value={selectedSimulationId}
+                                onChange={setSelectedSimulationId}
+                            />
+                        </div>
 
-                            <div>
-                                <p className="font-medium">
-                                    Simulation inactive
-                                </p>
-
+                        {selectedSimulationId === null ? (
+                            <div className="mt-4 rounded-lg bg-slate-50 p-4">
                                 <p className="text-sm text-slate-500">
-                                    Traffic simulation
-                                    will be
-                                    available in
-                                    Phase 3.
+                                    Select a simulation to view live traffic
+                                    metrics.
                                 </p>
                             </div>
-                        </div>
+                        ) : (
+                            <>
+                                <div className="mt-4 flex items-center justify-between rounded-lg bg-slate-50 p-4">
+                                    <div className="flex items-center gap-3">
+                                        <div
+                                            className={`h-3 w-3 rounded-full ${simulationStatus === "RUNNING"
+                                                ? "bg-green-500"
+                                                : "bg-slate-400"
+                                                }`}
+                                        />
+
+                                        <div>
+                                            <p className="font-medium text-slate-800">
+                                                {simulationStatus}
+                                            </p>
+
+                                            <p className="text-sm text-slate-500">
+                                                Simulation time:{" "}
+                                                {simulationTime}s
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {metricsLoading && !metrics ? (
+                                    <p className="mt-4 text-sm text-slate-500">
+                                        Loading metrics...
+                                    </p>
+                                ) : metricsError ? (
+                                    <p className="mt-4 text-sm text-red-500">
+                                        {metricsError}
+                                    </p>
+                                ) : metrics ? (
+                                    <div className="mt-4 grid grid-cols-2 gap-3">
+                                        <div className="rounded-lg bg-slate-50 p-3">
+                                            <p className="text-xs text-slate-500">
+                                                Total Vehicles
+                                            </p>
+                                            <p className="mt-1 text-xl font-semibold text-slate-800">
+                                                {metrics.totalVehicles}
+                                            </p>
+                                        </div>
+
+                                        <div className="rounded-lg bg-slate-50 p-3">
+                                            <p className="text-xs text-slate-500">
+                                                Active Vehicles
+                                            </p>
+                                            <p className="mt-1 text-xl font-semibold text-slate-800">
+                                                {metrics.activeVehicles}
+                                            </p>
+                                        </div>
+
+                                        <div className="rounded-lg bg-slate-50 p-3">
+                                            <p className="text-xs text-slate-500">
+                                                Waiting Vehicles
+                                            </p>
+                                            <p className="mt-1 text-xl font-semibold text-slate-800">
+                                                {metrics.waitingVehicles}
+                                            </p>
+                                        </div>
+
+                                        <div className="rounded-lg bg-slate-50 p-3">
+                                            <p className="text-xs text-slate-500">
+                                                Average Speed
+                                            </p>
+                                            <p className="mt-1 text-xl font-semibold text-slate-800">
+                                                {metrics.averageSpeedKmh.toFixed(1)}
+                                                {" "}
+                                                <span className="text-sm font-normal">
+                                                    km/h
+                                                </span>
+                                            </p>
+                                        </div>
+
+                                        <div className="rounded-lg bg-slate-50 p-3">
+                                            <p className="text-xs text-slate-500">
+                                                Active Queues
+                                            </p>
+                                            <p className="mt-1 text-xl font-semibold text-slate-800">
+                                                {metrics.activeQueues}
+                                            </p>
+                                        </div>
+
+                                        <div className="rounded-lg bg-slate-50 p-3">
+                                            <p className="text-xs text-slate-500">
+                                                Max Queue
+                                            </p>
+                                            <p className="mt-1 text-xl font-semibold text-slate-800">
+                                                {metrics.maximumQueueVehicles}
+                                            </p>
+                                        </div>
+                                    </div>
+                                ) : null}
+                            </>
+                        )}
                     </section>
 
                     {/* CITY INFRASTRUCTURE */}
