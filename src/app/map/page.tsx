@@ -42,6 +42,7 @@ export default function MapPage() {
                 setSelectedCityId={
                     setSelectedCityId
                 }
+                selectedSimulationId={null}
                 visibleLayers={visibleLayers}
                 cities={cities}
                 roads={roads}
