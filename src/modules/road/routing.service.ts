@@ -1,15 +1,8 @@
 import {
+    buildTraversalGraph,
     getVehicleRoadNetwork,
     type NetworkSegment,
 } from "../road/road_network.service";
-
-type GraphEdge = {
-    segment: NetworkSegment;
-    to: number;
-    isReverse: boolean;
-};
-
-type Graph = Map<number, GraphEdge[]>;
 
 export type RouteSegment = {
     segmentId: number;
@@ -22,111 +15,27 @@ export type RouteResult = {
     totalDistanceMeters: number;
 };
 
-/*
- * Build an undirected graph from the physical
- * road segments.
- *
- * Each physical segment creates TWO graph edges:
- *
- *     start → end     isReverse = false
- *     end   → start   isReverse = true
- *
- * This is important because the current road
- * dataset does not contain reliable one-way data.
- */
-function buildGraph(
-    segments: NetworkSegment[],
-): Graph {
-    const graph: Graph = new Map();
-
-    for (const segment of segments) {
-        const from =
-            Number(segment.startIntersectionId);
-
-        const to =
-            Number(segment.endIntersectionId);
-
-        /*
-         * --------------------------------------------
-         * Forward traversal
-         *
-         * Geometry:
-         *
-         * START → END
-         * --------------------------------------------
-         */
-        if (!graph.has(from)) {
-            graph.set(from, []);
-        }
-
-        graph.get(from)!.push({
-            segment,
-            to,
-            isReverse: false,
-        });
-
-        /*
-         * --------------------------------------------
-         * Reverse traversal
-         *
-         * Geometry:
-         *
-         * END → START
-         * --------------------------------------------
-         */
-        if (!graph.has(to)) {
-            graph.set(to, []);
-        }
-
-        graph.get(to)!.push({
-            segment,
-            to: from,
-            isReverse: true,
-        });
-    }
-
-    return graph;
-}
-
-/*
- * Return every intersection reachable from
- * the supplied starting intersection.
- */
+/** Return every intersection reachable from the supplied starting intersection. */
 export async function getReachableIntersections(
     cityId: number,
     startIntersectionId: number,
 ): Promise<number[]> {
-    const { segments } =
-        await getVehicleRoadNetwork(cityId);
+    const { segments } = await getVehicleRoadNetwork(cityId);
+    const graph = buildTraversalGraph(segments);
 
-    const graph =
-        buildGraph(segments);
+    if (!graph.has(startIntersectionId)) return [];
 
-    const visited =
-        new Set<number>();
+    const visited = new Set<number>([startIntersectionId]);
+    const queue: number[] = [startIntersectionId];
+    let head = 0;
 
-    const queue: number[] = [
-        startIntersectionId,
-    ];
-
-    visited.add(
-        startIntersectionId,
-    );
-
-    while (queue.length > 0) {
-        const current =
-            queue.shift()!;
-
-        const edges =
-            graph.get(current) ?? [];
-
-        for (const edge of edges) {
-            const next =
-                Number(edge.to);
-
-            if (!visited.has(next)) {
-                visited.add(next);
-                queue.push(next);
+    // A head index avoids the repeated array shifting cost of queue.shift().
+    while (head < queue.length) {
+        const current = queue[head++];
+        for (const edge of graph.get(current) ?? []) {
+            if (!visited.has(edge.to)) {
+                visited.add(edge.to);
+                queue.push(edge.to);
             }
         }
     }
@@ -134,319 +43,119 @@ export async function getReachableIntersections(
     return Array.from(visited);
 }
 
-/*
- * Find the shortest route using Dijkstra's algorithm.
- *
- * The returned route contains:
- *
- *     segmentId
- *     isReverse
- *
- * for every segment.
- */
+/** Find the shortest distance route with Dijkstra's algorithm. */
 export async function findShortestRoute(
     cityId: number,
     startIntersectionId: number,
     destinationIntersectionId: number,
 ): Promise<RouteResult | null> {
-    /*
-     * Start and destination are identical.
-     */
     if (
-        startIntersectionId ===
-        destinationIntersectionId
+        !Number.isInteger(startIntersectionId) ||
+        !Number.isInteger(destinationIntersectionId) ||
+        startIntersectionId <= 0 ||
+        destinationIntersectionId <= 0
     ) {
+        return null;
+    }
+
+    if (startIntersectionId === destinationIntersectionId) {
         return {
-            intersections: [
-                startIntersectionId,
-            ],
-
+            intersections: [startIntersectionId],
             segments: [],
-
             totalDistanceMeters: 0,
         };
     }
 
-    /*
-     * Load the city's road network.
-     */
-    const network =
-        await getVehicleRoadNetwork(cityId);
+    const network = await getVehicleRoadNetwork(cityId);
+    const graph = buildTraversalGraph(network.segments);
 
-    const graph =
-        buildGraph(network.segments);
-
-    /*
-     * Both intersections must exist in the graph.
-     */
-    if (!graph.has(startIntersectionId)) {
-        return null;
-    }
-
-    if (!graph.has(destinationIntersectionId)) {
-        return null;
-    }
-
-    /*
-     * Distance from start to every node.
-     */
-    const distances =
-        new Map<number, number>();
-
-    /*
-     * Stores how we reached each intersection.
-     *
-     * Example:
-     *
-     * intersection 1163 was reached from 1160
-     * using segment 396 in reverse direction.
-     */
-    const previous =
-        new Map<
-            number,
-            {
-                intersectionId: number;
-                segmentId: number;
-                isReverse: boolean;
-            }
-        >();
-
-    /*
-     * Nodes that have not yet been processed.
-     */
-    const unvisited =
-        new Set<number>();
-
-    /*
-     * Initialize all graph nodes.
-     */
-    for (
-        const intersectionId of graph.keys()
-    ) {
-        distances.set(
-            intersectionId,
-            Infinity,
-        );
-
-        unvisited.add(
-            intersectionId,
-        );
-    }
-
-    /*
-     * Starting intersection has distance 0.
-     */
-    distances.set(
-        startIntersectionId,
-        0,
-    );
-
-    /*
-     * --------------------------------------------
-     * Dijkstra
-     * --------------------------------------------
-     */
-    while (unvisited.size > 0) {
-        let current:
-            number | null = null;
-
-        let currentDistance =
-            Infinity;
-
-        /*
-         * Find the unvisited node with the
-         * smallest known distance.
-         */
-        for (
-            const intersectionId of unvisited
-        ) {
-            const distance =
-                distances.get(
-                    intersectionId,
-                ) ?? Infinity;
-
-            if (
-                distance <
-                currentDistance
-            ) {
-                currentDistance =
-                    distance;
-
-                current =
-                    intersectionId;
-            }
-        }
-
-        /*
-         * No reachable nodes remain.
-         */
-        if (current === null) {
-            break;
-        }
-
-        /*
-         * Destination reached.
-         */
-        if (
-            current ===
-            destinationIntersectionId
-        ) {
-            break;
-        }
-
-        /*
-         * Mark current node as processed.
-         */
-        unvisited.delete(
-            current,
-        );
-
-        const edges =
-            graph.get(current) ?? [];
-
-        /*
-         * Relax every outgoing edge.
-         */
-        for (const edge of edges) {
-            const neighbor =
-                edge.to;
-
-            if (
-                !unvisited.has(
-                    neighbor,
-                )
-            ) {
-                continue;
-            }
-
-            const newDistance =
-                currentDistance +
-                Number(
-                    edge.segment.lengthMeters,
-                );
-
-            const oldDistance =
-                distances.get(
-                    neighbor,
-                ) ?? Infinity;
-
-            /*
-             * Found a shorter route.
-             */
-            if (
-                newDistance <
-                oldDistance
-            ) {
-                distances.set(
-                    neighbor,
-                    newDistance,
-                );
-
-                previous.set(
-                    neighbor,
-                    {
-                        intersectionId:
-                            current,
-
-                        segmentId:
-                            edge.segment.id,
-
-                        isReverse:
-                            edge.isReverse,
-                    },
-                );
-            }
-        }
-    }
-
-    /*
-     * Get destination distance.
-     */
-    const destinationDistance =
-        distances.get(
-            destinationIntersectionId,
-        );
-
-    /*
-     * Destination is unreachable.
-     */
     if (
-        destinationDistance ===
-        undefined ||
-        destinationDistance ===
-        Infinity
+        !graph.has(startIntersectionId) ||
+        !graph.has(destinationIntersectionId)
     ) {
         return null;
     }
 
-    /*
-     * --------------------------------------------
-     * Reconstruct route
-     * --------------------------------------------
-     */
-    const intersectionPath:
-        number[] = [];
+    const distances = new Map<number, number>();
+    const previous = new Map<
+        number,
+        { intersectionId: number; segmentId: number; isReverse: boolean }
+    >();
+    const unvisited = new Set<number>(graph.keys());
 
-    const segmentPath:
-        RouteSegment[] = [];
+    for (const intersectionId of graph.keys()) {
+        distances.set(intersectionId, Infinity);
+    }
+    distances.set(startIntersectionId, 0);
 
-    let current =
-        destinationIntersectionId;
+    while (unvisited.size > 0) {
+        let current: number | null = null;
+        let currentDistance = Infinity;
 
-    intersectionPath.push(
-        current,
-    );
-
-    /*
-     * Walk backwards from destination
-     * to starting intersection.
-     */
-    while (
-        current !==
-        startIntersectionId
-    ) {
-        const previousNode =
-            previous.get(current);
-
-        if (!previousNode) {
-            return null;
+        for (const intersectionId of unvisited) {
+            const distance = distances.get(intersectionId) ?? Infinity;
+            if (distance < currentDistance) {
+                currentDistance = distance;
+                current = intersectionId;
+            }
         }
 
-        segmentPath.push({
-            segmentId:
-                previousNode.segmentId,
+        if (current === null || currentDistance === Infinity) break;
+        if (current === destinationIntersectionId) break;
 
-            isReverse:
-                previousNode.isReverse,
-        });
+        unvisited.delete(current);
 
-        current =
-            previousNode.intersectionId;
+        for (const edge of graph.get(current) ?? []) {
+            const neighbor = edge.to;
+            if (!unvisited.has(neighbor)) continue;
 
-        intersectionPath.push(
-            current,
-        );
+            const edgeLength = Number(edge.segment.lengthMeters);
+            if (!Number.isFinite(edgeLength) || edgeLength < 0) continue;
+
+            const newDistance = currentDistance + edgeLength;
+            const oldDistance = distances.get(neighbor) ?? Infinity;
+
+            if (newDistance < oldDistance) {
+                distances.set(neighbor, newDistance);
+                previous.set(neighbor, {
+                    intersectionId: current,
+                    segmentId: edge.segment.id,
+                    isReverse: edge.isReverse,
+                });
+            }
+        }
     }
 
-    /*
-     * We reconstructed the path backwards,
-     * so reverse both arrays.
-     */
-    intersectionPath.reverse();
+    const destinationDistance = distances.get(destinationIntersectionId);
+    if (destinationDistance === undefined || !Number.isFinite(destinationDistance)) {
+        return null;
+    }
 
-    segmentPath.reverse();
+    const intersections: number[] = [destinationIntersectionId];
+    const routeSegments: RouteSegment[] = [];
+    let current = destinationIntersectionId;
 
-    /*
-     * Return the complete route.
-     */
+    while (current !== startIntersectionId) {
+        const previousNode = previous.get(current);
+        if (!previousNode) return null;
+
+        routeSegments.push({
+            segmentId: previousNode.segmentId,
+            isReverse: previousNode.isReverse,
+        });
+        current = previousNode.intersectionId;
+        intersections.push(current);
+    }
+
+    intersections.reverse();
+    routeSegments.reverse();
+
     return {
-        intersections:
-            intersectionPath,
-
-        segments:
-            segmentPath,
-
-        totalDistanceMeters:
-            destinationDistance,
+        intersections,
+        segments: routeSegments,
+        totalDistanceMeters: destinationDistance,
     };
 }
+
+// Keep the type available to existing consumers importing it from this module.
+export type { NetworkSegment };

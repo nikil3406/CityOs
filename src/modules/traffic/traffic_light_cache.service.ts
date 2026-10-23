@@ -7,9 +7,6 @@ import {
     trafficLightMovements,
 } from "@/db/schema";
 
-let activeTrafficLightCityId:
-    number | null = null;
-
 export type CachedTrafficLight = {
     id: number;
     cityId: number;
@@ -397,8 +394,6 @@ export async function loadTrafficLightCache(
         cache,
     );
 
-    activeTrafficLightCityId =
-    cityId;
 
     return cache;
 }
@@ -439,19 +434,11 @@ export function getCachedTrafficLight(
  * an intersection.
  */
 export function getCachedTrafficLightsAtIntersection(
+    cityId: number,
     intersectionId: number,
 ) {
-    if (
-        activeTrafficLightCityId ===
-        null
-    ) {
-        return [];
-    }
-
     const cache =
-        cachesByCity.get(
-            activeTrafficLightCityId,
-        );
+        cachesByCity.get(cityId);
 
     if (!cache) {
         return [];
@@ -563,11 +550,4 @@ export function clearTrafficLightCache(
         cityId,
     );
 
-    if (
-        activeTrafficLightCityId ===
-        cityId
-    ) {
-        activeTrafficLightCityId =
-            null;
-    }
 }

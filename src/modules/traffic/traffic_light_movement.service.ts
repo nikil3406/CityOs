@@ -1,7 +1,6 @@
 import {
     getCachedTrafficLightsAtIntersection,
     getCachedMovement,
-    getCachedTrafficLightPhase,
     getCachedTrafficLightPhases,
 } from "./traffic_light_cache.service";
 
@@ -13,18 +12,18 @@ export type TrafficLightDecision = {
 };
 
 export function getMovementSignal(
+    cityId: number,
     intersectionId: number,
     fromRoadId: number,
     toRoadId: number,
 ): TrafficLightDecision {
     const lights =
         getCachedTrafficLightsAtIntersection(
+            cityId,
             intersectionId,
         );
 
-    /*
-     * No traffic light at this intersection.
-     */
+    // No traffic light is configured at this intersection.
     if (lights.length === 0) {
         return {
             hasTrafficLight: false,
@@ -34,16 +33,12 @@ export function getMovementSignal(
         };
     }
 
-    /*
-     * Find the active traffic light
-     * controlling this intersection.
-     */
     const activeLight =
         lights.find(
-            (light) =>
-                light.status === "ACTIVE",
+            (light) => light.status === "ACTIVE",
         );
 
+    // Preserve existing behavior when no light is active.
     if (!activeLight) {
         return {
             hasTrafficLight: false,
@@ -53,10 +48,6 @@ export function getMovementSignal(
         };
     }
 
-    /*
-     * Look up the exact movement for
-     * the current phase.
-     */
     const movement =
         getCachedMovement(
             activeLight.cityId,
@@ -75,68 +66,41 @@ export function getMovementSignal(
         };
     }
 
-    /*
-     * Check if this movement is configured in ANY phase
-     * for this traffic light.
-     */
+    // Determine whether this movement is configured in another phase.
     const phases =
         getCachedTrafficLightPhases(
             activeLight.cityId,
             activeLight.id,
         );
 
-    let hasMovementInAnyPhase = false;
+    for (const phaseNumber of phases.keys()) {
+        const configuredMovement =
+            getCachedMovement(
+                activeLight.cityId,
+                activeLight.id,
+                phaseNumber,
+                fromRoadId,
+                toRoadId,
+            );
 
-    for (const phaseNum of phases.keys()) {
-        const m = getCachedMovement(
-            activeLight.cityId,
-            activeLight.id,
-            phaseNum,
-            fromRoadId,
-            toRoadId,
-        );
-
-        if (m) {
-            hasMovementInAnyPhase = true;
-            break;
+        if (configuredMovement) {
+            // A configured movement that is not green/yellow in the
+            // current phase must wait for its assigned phase.
+            return {
+                hasTrafficLight: true,
+                state: "RED",
+                phase: activeLight.currentPhase,
+                trafficLightId: activeLight.id,
+            };
         }
     }
 
-    if (hasMovementInAnyPhase) {
-        /*
-         * Movement is registered but not active during this phase.
-         */
-        return {
-            hasTrafficLight: true,
-            state: "RED",
-            phase: activeLight.currentPhase,
-            trafficLightId: activeLight.id,
-        };
-    }
-
-    /*
-     * Fallback if the movement was not explicitly mapped:
-     * Follow the general phase state so vehicles don't get permanently stuck.
-     */
-    const phase =
-        getCachedTrafficLightPhase(
-            activeLight.cityId,
-            activeLight.id,
-            activeLight.currentPhase,
-        );
-
-    const fallbackState: "GREEN" | "YELLOW" | "RED" =
-        phase?.state === "GREEN" ||
-        phase?.state === "YELLOW" ||
-        phase?.state === "RED"
-            ? (phase.state as "GREEN" | "YELLOW" | "RED")
-            : activeLight.currentPhase % 2 === 1
-                ? "GREEN"
-                : "RED";
-
+    // Fail safely: an active signal exists, but this movement has no
+    // explicit configuration in any phase. Do not infer permission from
+    // the intersection's general phase state.
     return {
         hasTrafficLight: true,
-        state: fallbackState,
+        state: "RED",
         phase: activeLight.currentPhase,
         trafficLightId: activeLight.id,
     };

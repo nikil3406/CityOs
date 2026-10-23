@@ -219,6 +219,7 @@ async function updateVehiclePosition(
  * RED    → vehicle must stop
  */
 async function checkTrafficLight(
+    cityId: number,
     vehicleId: number,
     currentSegment: {
         roadId: number;
@@ -241,6 +242,7 @@ async function checkTrafficLight(
 
     const signal =
         getMovementSignal(
+            cityId,
             approachingIntersectionId,
             Number(
                 currentSegment.roadId,
@@ -249,6 +251,19 @@ async function checkTrafficLight(
                 nextSegment.roadId,
             ),
         );
+
+    console.log(
+    `[SIGNAL CHECK] ` +
+    `vehicle=${vehicleId} | ` +
+    `city=${cityId} | ` +
+    `intersection=${approachingIntersectionId} | ` +
+    `fromRoad=${currentSegment.roadId} | ` +
+    `toRoad=${nextSegment.roadId} | ` +
+    `hasTrafficLight=${signal.hasTrafficLight} | ` +
+    `light=${signal.trafficLightId ?? "N/A"} | ` +
+    `phase=${signal.phase ?? "N/A"} | ` +
+    `state=${signal.state}`,
+);
 
     return {
         ...signal,
@@ -325,6 +340,15 @@ async function stopAtTrafficLight(
 
     vehicle.isReverse =
         isReverse;
+
+    console.log(
+    `[SIGNAL STOP] ` +
+    `vehicle=${vehicle.id} | ` +
+    `intersection=${intersectionId} | ` +
+    `segment=${segmentId} | ` +
+    `progress=${stoppedProgress.toFixed(4)} | ` +
+    `speed=0`,
+);
 
     console.log(
         `Vehicle ${vehicle.id}: ` +
@@ -554,13 +578,13 @@ async function moveVehicle(
                     UPDATE vehicles
                     SET
                         speed_kmh = 0,
-                        status = 'WAITING',
+                        status = 'WAITING_BEHIND_VEHICLE',
                         updated_at = NOW()
                     WHERE id = ${vehicle.id};
                 `);
 
                 vehicle.status =
-                    "WAITING";
+                    "WAITING_BEHIND_VEHICLE";
                 vehicle.speedKmh = 0;
 
                 const vehicleState =
@@ -571,7 +595,7 @@ async function moveVehicle(
 
                 if (vehicleState) {
                     vehicleState.status =
-                        "WAITING";
+                        "WAITING_BEHIND_VEHICLE";
 
                     updateSimulationVehicleState(
                         vehicle.simulationRunId,
@@ -662,14 +686,14 @@ async function moveVehicle(
                 currentProgress,
                 isReverse,
                 normalSpeedKmh,
-                "WAITING",
+                "MOVING",
             );
 
             vehicle.progress =
                 currentProgress;
 
             vehicle.status =
-                "WAITING";
+                "MOVING";
 
             return true;
         }
@@ -732,6 +756,7 @@ async function moveVehicle(
             ) {
                 const signal =
                     await checkTrafficLight(
+                        vehicle.cityId,
                         vehicle.id,
                         {
                             roadId:
@@ -787,14 +812,14 @@ async function moveVehicle(
                 currentProgress,
                 isReverse,
                 normalSpeedKmh,
-                "WAITING",
+                "MOVING",
             );
 
             vehicle.progress =
                 currentProgress;
 
             vehicle.status =
-                "WAITING";
+                "MOVING";
 
             return true;
         }
@@ -804,8 +829,12 @@ async function moveVehicle(
          *
          * Before crossing, check the movement signal.
          */
+        
         const signal =
+
             await checkTrafficLight(
+                
+                vehicle.cityId,
                 vehicle.id,
                 {
                     roadId:
@@ -905,7 +934,7 @@ async function moveVehicle(
                 0,
                 isReverse,
                 normalSpeedKmh,
-                "WAITING",
+                "MOVING",
             );
 
             return true;
@@ -923,7 +952,7 @@ async function moveVehicle(
             0,
             isReverse,
             normalSpeedKmh,
-            "WAITING",
+            "MOVING",
         );
     }
 
@@ -975,9 +1004,13 @@ export async function moveVehicles(
          */
         if (
             vehicleState.status !==
+            "MOVING" &&
+            vehicleState.status !==
             "WAITING" &&
             vehicleState.status !==
-            "WAITING_AT_SIGNAL"
+            "WAITING_AT_SIGNAL" &&
+            vehicleState.status !==
+            "WAITING_BEHIND_VEHICLE"
         ) {
             continue;
         }

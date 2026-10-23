@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 
 import { db } from "@/db";
 import {
+    simulationRuns,
     vehicles,
     vehicleRoutes,
 } from "@/db/schema";
@@ -9,6 +10,7 @@ import {
 export type SimulationVehicleState = {
     id: number;
     simulationRunId: number;
+    cityId: number;
     currentSegmentId: number | null;
     destinationIntersectionId: number | null;
     routeSequence: number;
@@ -35,6 +37,9 @@ export async function initializeSimulationVehicleStates(
 
                 simulationRunId:
                     vehicles.simulationRunId,
+
+                cityId:
+                    simulationRuns.cityId,
 
                 currentSegmentId:
                     vehicles.currentSegmentId,
@@ -72,6 +77,13 @@ export async function initializeSimulationVehicleStates(
                     ),
                 ),
             )
+            .innerJoin(
+                simulationRuns,
+                eq(
+                    simulationRuns.id,
+                    vehicles.simulationRunId,
+                ),
+            )
             .where(
                 eq(
                     vehicles.simulationRunId,
@@ -92,6 +104,11 @@ export async function initializeSimulationVehicleStates(
                 simulationRunId:
                     Number(
                         vehicle.simulationRunId,
+                    ),
+
+                cityId:
+                    Number(
+                        vehicle.cityId,
                     ),
 
                 currentSegmentId:

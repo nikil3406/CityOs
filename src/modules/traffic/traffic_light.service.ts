@@ -5,6 +5,8 @@ import {
     trafficLights,
 } from "@/db/schema";
 
+import { SimulationConfig } from "@/lib/constants";
+
 import {
     loadTrafficLightCache,
     getCachedTrafficLight,
@@ -138,30 +140,18 @@ export async function updateTrafficLight(
         );
     }
 
-    const newElapsed =
-        light.phaseElapsed + 1;
+    const tickSeconds =
+        SimulationConfig.simulationSecondsPerTick;
 
-    /*
-     * Normal phase progression.
-     */
     if (
-        newElapsed <
-        phase.durationSeconds
+        !Number.isFinite(tickSeconds) ||
+        tickSeconds <= 0
     ) {
-        light.phaseElapsed =
-            newElapsed;
-
-        updateCachedTrafficLight(
-            light.cityId,
-            light,
+        throw new Error(
+            "SimulationConfig.simulationSecondsPerTick must be a positive number",
         );
-
-        return light;
     }
 
-    /*
-     * Phase has finished.
-     */
     const phases =
         getCachedTrafficLightPhases(
             light.cityId,
@@ -183,24 +173,60 @@ export async function updateTrafficLight(
         );
     }
 
-    const currentIndex =
-        phaseNumbers.indexOf(
-            light.currentPhase,
-        );
+    let elapsedRemaining =
+        light.phaseElapsed + tickSeconds;
 
-    const nextPhase =
-        currentIndex === -1 ||
-        currentIndex ===
-            phaseNumbers.length - 1
-            ? phaseNumbers[0]
-            : phaseNumbers[
-                  currentIndex + 1
-              ];
+    let phaseChanged = false;
 
-    light.currentPhase =
-        nextPhase;
+    /*
+     * Carry elapsed time across phase boundaries.
+     * This keeps signal timing correct even when one
+     * simulation tick represents multiple seconds.
+     */
+    while (true) {
+        const currentPhaseConfig =
+            phases.get(light.currentPhase);
 
-    light.phaseElapsed = 0;
+        if (!currentPhaseConfig) {
+            throw new Error(
+                `Phase ${light.currentPhase} not found for traffic light ${light.id}`,
+            );
+        }
+
+        const durationSeconds =
+            Number(currentPhaseConfig.durationSeconds);
+
+        if (
+            !Number.isFinite(durationSeconds) ||
+            durationSeconds <= 0
+        ) {
+            throw new Error(
+                `Invalid duration for phase ${light.currentPhase} of traffic light ${light.id}`,
+            );
+        }
+
+        if (elapsedRemaining < durationSeconds) {
+            light.phaseElapsed =
+                elapsedRemaining;
+
+            break;
+        }
+
+        elapsedRemaining -= durationSeconds;
+
+        const currentIndex =
+            phaseNumbers.indexOf(
+                light.currentPhase,
+            );
+
+        light.currentPhase =
+            currentIndex === -1 ||
+            currentIndex === phaseNumbers.length - 1
+                ? phaseNumbers[0]
+                : phaseNumbers[currentIndex + 1];
+
+        phaseChanged = true;
+    }
 
     updateCachedTrafficLight(
         light.cityId,
@@ -208,26 +234,28 @@ export async function updateTrafficLight(
     );
 
     /*
-     * Persist only when the phase changes.
+     * Persist phase transitions only.
      */
-    await db
-        .update(trafficLights)
-        .set({
-            currentPhase:
-                light.currentPhase,
+    if (phaseChanged) {
+        await db
+            .update(trafficLights)
+            .set({
+                currentPhase:
+                    light.currentPhase,
 
-            phaseElapsed:
-                light.phaseElapsed,
+                phaseElapsed:
+                    light.phaseElapsed,
 
-            updatedAt:
-                new Date(),
-        })
-        .where(
-            eq(
-                trafficLights.id,
-                light.id,
-            ),
-        );
+                updatedAt:
+                    new Date(),
+            })
+            .where(
+                eq(
+                    trafficLights.id,
+                    light.id,
+                ),
+            );
+    }
 
     return light;
 }
@@ -290,27 +318,18 @@ export async function updateTrafficLights(
             );
         }
 
-        const newElapsed =
-            light.phaseElapsed + 1;
+        const tickSeconds =
+            SimulationConfig.simulationSecondsPerTick;
 
-        /*
-         * Phase continues.
-         *
-         * RAM only.
-         */
         if (
-            newElapsed <
-            phase.durationSeconds
+            !Number.isFinite(tickSeconds) ||
+            tickSeconds <= 0
         ) {
-            light.phaseElapsed =
-                newElapsed;
-
-            continue;
+            throw new Error(
+                "SimulationConfig.simulationSecondsPerTick must be a positive number",
+            );
         }
 
-        /*
-         * Phase finished.
-         */
         const phases =
             getCachedTrafficLightPhases(
                 cityId,
@@ -327,49 +346,88 @@ export async function updateTrafficLights(
         if (
             phaseNumbers.length === 0
         ) {
-            continue;
+            throw new Error(
+                `No phases configured for traffic light ${light.id}`,
+            );
         }
 
-        const currentIndex =
-            phaseNumbers.indexOf(
-                light.currentPhase,
-            );
+        let elapsedRemaining =
+            light.phaseElapsed + tickSeconds;
 
-        const nextPhase =
-            currentIndex === -1 ||
-            currentIndex ===
-                phaseNumbers.length - 1
-                ? phaseNumbers[0]
-                : phaseNumbers[
-                      currentIndex + 1
-                  ];
-
-        light.currentPhase =
-            nextPhase;
-
-        light.phaseElapsed =
-            0;
+        let phaseChanged = false;
 
         /*
-         * Persist phase transitions only.
+         * Carry elapsed time across phase boundaries
+         * instead of dropping extra simulated seconds.
          */
-        await db
-            .update(trafficLights)
-            .set({
-                currentPhase:
+        while (true) {
+            const currentPhaseConfig =
+                phases.get(light.currentPhase);
+
+            if (!currentPhaseConfig) {
+                throw new Error(
+                    `Phase ${light.currentPhase} not found for traffic light ${light.id}`,
+                );
+            }
+
+            const durationSeconds =
+                Number(currentPhaseConfig.durationSeconds);
+
+            if (
+                !Number.isFinite(durationSeconds) ||
+                durationSeconds <= 0
+            ) {
+                throw new Error(
+                    `Invalid duration for phase ${light.currentPhase} of traffic light ${light.id}`,
+                );
+            }
+
+            if (elapsedRemaining < durationSeconds) {
+                light.phaseElapsed =
+                    elapsedRemaining;
+
+                break;
+            }
+
+            elapsedRemaining -= durationSeconds;
+
+            const currentIndex =
+                phaseNumbers.indexOf(
                     light.currentPhase,
+                );
 
-                phaseElapsed:
-                    light.phaseElapsed,
+            light.currentPhase =
+                currentIndex === -1 ||
+                currentIndex === phaseNumbers.length - 1
+                    ? phaseNumbers[0]
+                    : phaseNumbers[currentIndex + 1];
 
-                updatedAt:
-                    new Date(),
-            })
-            .where(
-                eq(
-                    trafficLights.id,
-                    light.id,
-                ),
-            );
+            phaseChanged = true;
+        }
+
+        /*
+         * Persist phase transitions only. Elapsed time
+         * without a transition remains in the runtime cache.
+         */
+        if (phaseChanged) {
+            await db
+                .update(trafficLights)
+                .set({
+                    currentPhase:
+                        light.currentPhase,
+
+                    phaseElapsed:
+                        light.phaseElapsed,
+
+                    updatedAt:
+                        new Date(),
+                })
+                .where(
+                    eq(
+                        trafficLights.id,
+                        light.id,
+                    ),
+                );
+        }
     }
 }

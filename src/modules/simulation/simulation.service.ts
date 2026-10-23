@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import { simulationRuns } from "@/db/schema";
+import { SimulationConfig } from "@/lib/constants";
 
 export async function getSimulationRun(
     simulationId: number,
@@ -26,7 +27,7 @@ export async function advanceSimulationTime(
     const result = await db
         .update(simulationRuns)
         .set({
-            simulationTime: sql`${simulationRuns.simulationTime} + 1`,
+            simulationTime: sql`${simulationRuns.simulationTime} + ${SimulationConfig.simulationSecondsPerTick}`,
             updatedAt: new Date(),
         })
         .where(eq(simulationRuns.id, simulationId))

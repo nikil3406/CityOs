@@ -47,6 +47,7 @@ export async function classifyMovement(
     const incomingBearing =
         await getSegmentBearing(
             incomingSegmentId,
+            false,
             true,
         );
 
@@ -142,46 +143,57 @@ export async function classifyIntersectionMovements(
     return movements;
 }
 
+/**
+ * Get a segment bearing at its start or end.
+ *
+ * `reverse` calculates the bearing while traversing the geometry backwards.
+ * By default, forward bearings use the first edge and reverse bearings use
+ * the final edge, preserving the original two-argument behavior. Set `atEnd`
+ * explicitly to select the final edge for forward travel or the first edge
+ * for reverse travel.
+ */
 export async function getSegmentBearing(
     segmentId: number,
     reverse = false,
+    atEnd = reverse,
 ): Promise<number | null> {
+    // Bearings must follow the direction of travel along the geometry.
+    // For an incoming segment, calculate the bearing of its final edge
+    // (the penultimate vertex -> endpoint), not the reverse direction
+    // away from the intersection.
+    const fromPoint = atEnd
+        ? reverse
+            ? sql`ST_EndPoint(rs.geometry)`
+            : sql`ST_PointN(
+                    rs.geometry,
+                    ST_NPoints(rs.geometry) - 1
+                )`
+        : reverse
+            ? sql`ST_PointN(rs.geometry, 2)`
+            : sql`ST_StartPoint(rs.geometry)`;
+
+    const toPoint = atEnd
+        ? reverse
+            ? sql`ST_PointN(
+                    rs.geometry,
+                    ST_NPoints(rs.geometry) - 1
+                )`
+            : sql`ST_EndPoint(rs.geometry)`
+        : reverse
+            ? sql`ST_StartPoint(rs.geometry)`
+            : sql`ST_PointN(rs.geometry, 2)`;
+
     const result = await db.execute(sql`
         SELECT
             DEGREES(
                 ST_Azimuth(
-                    ${reverse
-            ? sql`
-                                ST_EndPoint(
-                                    rs.geometry
-                                )
-                            `
-            : sql`
-                                ST_StartPoint(
-                                    rs.geometry
-                                )
-                            `
-        },
-                    ${reverse
-            ? sql`
-                                ST_PointN(
-                                    rs.geometry,
-                                    ST_NPoints(
-                                        rs.geometry
-                                    ) - 1
-                                )
-                            `
-            : sql`
-                                ST_PointN(
-                                    rs.geometry,
-                                    2
-                                )
-                            `
-        }
+                    ${fromPoint},
+                    ${toPoint}
                 )
             ) AS "bearing"
         FROM road_segments rs
         WHERE rs.id = ${segmentId}
+          AND ST_NPoints(rs.geometry) >= 2
         LIMIT 1;
     `);
 

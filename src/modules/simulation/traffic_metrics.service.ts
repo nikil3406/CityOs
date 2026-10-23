@@ -50,9 +50,11 @@ export function calculateTrafficMetrics(
         vehicles.filter(
             (vehicle) =>
                 vehicle.status ===
-                    "WAITING" ||
+                    "WAITING_AT_SIGNAL" ||
                 vehicle.status ===
-                    "WAITING_AT_SIGNAL",
+                    "WAITING_BEHIND_VEHICLE" ||
+                (vehicle.status === "WAITING" &&
+                    vehicle.speedKmh <= 1),
         ).length;
 
     const signalWaitingVehicles =
@@ -72,8 +74,7 @@ export function calculateTrafficMetrics(
     const movingVehicles =
         vehicles.filter(
             (vehicle) =>
-                vehicle.status !==
-                    "COMPLETED" &&
+                vehicle.status === "MOVING" &&
                 vehicle.speedKmh > 0,
         );
 

@@ -55,8 +55,10 @@ export function checkVehicleAhead(
         }
 
         if (
+            vehicle.status !== "MOVING" &&
             vehicle.status !== "WAITING" &&
-            vehicle.status !== "WAITING_AT_SIGNAL"
+            vehicle.status !== "WAITING_AT_SIGNAL" &&
+            vehicle.status !== "WAITING_BEHIND_VEHICLE"
         ) {
             continue;
         }

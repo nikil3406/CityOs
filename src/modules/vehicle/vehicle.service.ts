@@ -1,14 +1,12 @@
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import {
-    vehicles,
-    vehicleRoutes,
-} from "@/db/schema";
+import { vehicleRoutes } from "@/db/schema";
 
 import {
     getReachableIntersections,
     findShortestRoute,
+    type RouteResult,
 } from "@/modules/road/routing.service";
 
 type GeneratedVehicle = {
@@ -30,373 +28,256 @@ type SelectedSegment = {
     endIntersectionId: number;
 };
 
+type VehiclePlan = {
+    route: RouteResult;
+    destinationIntersectionId: number;
+    firstSegmentId: number;
+    firstSegmentIsReverse: boolean;
+    firstRoadId: number;
+    speedKmh: number;
+    geometry: unknown;
+};
+
+/**
+ * Generate exactly `count` vehicles, or fail before inserting any vehicles if
+ * the city's available road network cannot provide enough valid routes.
+ *
+ * The initial vehicle state is MOVING because it is created with positive speed
+ * at the beginning of its first route segment.
+ */
 export async function generateVehicles(
     simulationRunId: number,
     count: number,
 ): Promise<GeneratedVehicle[]> {
-    /*
-     * Validate requested vehicle count.
-     */
-    if (
-        !Number.isInteger(count) ||
-        count <= 0
-    ) {
-        throw new Error(
-            "Vehicle count must be a positive integer",
-        );
+    if (!Number.isInteger(count) || count <= 0) {
+        throw new Error("Vehicle count must be a positive integer");
     }
 
-    /*
-     * --------------------------------------------
-     * Get the city belonging to this simulation.
-     * --------------------------------------------
-     */
-    const simulationResult =
-        await db.execute(sql`
-            SELECT
-                city_id AS "cityId"
-            FROM simulation_runs
-            WHERE id = ${simulationRunId}
-            LIMIT 1;
-        `);
+    const simulationResult = await db.execute(sql`
+        SELECT city_id AS "cityId"
+        FROM simulation_runs
+        WHERE id = ${simulationRunId}
+        LIMIT 1;
+    `);
 
-    if (
-        simulationResult.length === 0
-    ) {
-        throw new Error(
-            "Simulation run not found",
-        );
+    if (simulationResult.length === 0) {
+        throw new Error("Simulation run not found");
     }
 
-    const cityId =
-        Number(
-            simulationResult[0].cityId,
-        );
+    const cityId = Number(
+        (simulationResult[0] as { cityId: number | string }).cityId,
+    );
 
-    /*
-     * --------------------------------------------
-     * Select random usable road segments.
-     *
-     * Footways are excluded.
-     *
-     * The selected segments must have valid
-     * intersections because they belong to
-     * the simulation road network.
-     * --------------------------------------------
-     */
-    const segmentResult =
-        await db.execute(sql`
-            SELECT
-                rs.id,
+    const segmentResult = await db.execute(sql`
+        SELECT
+            rs.id,
+            rs.road_id AS "roadId",
+            rs.speed_limit_kmh AS "speedLimitKmh",
+            rs.start_intersection_id AS "startIntersectionId",
+            rs.end_intersection_id AS "endIntersectionId"
+        FROM road_segments rs
+        JOIN roads r ON r.id = rs.road_id
+        WHERE
+            r.city_id = ${cityId}
+            AND LOWER(COALESCE(r.type, '')) <> 'footway'
+        ORDER BY RANDOM();
+    `);
 
-                rs.road_id AS "roadId",
+    const candidates = (segmentResult as unknown as SelectedSegment[]).map(
+        (segment) => ({
+            id: Number(segment.id),
+            roadId: Number(segment.roadId),
+            speedLimitKmh:
+                segment.speedLimitKmh === null
+                    ? null
+                    : Number(segment.speedLimitKmh),
+            startIntersectionId: Number(segment.startIntersectionId),
+            endIntersectionId: Number(segment.endIntersectionId),
+        }),
+    );
 
-                rs.speed_limit_kmh
-                    AS "speedLimitKmh",
-
-                rs.start_intersection_id
-                    AS "startIntersectionId",
-
-                rs.end_intersection_id
-                    AS "endIntersectionId"
-
-            FROM road_segments rs
-
-            JOIN roads r
-                ON r.id = rs.road_id
-
-            WHERE
-                r.city_id = ${cityId}
-
-                AND LOWER(
-                    COALESCE(r.type, '')
-                ) <> 'footway'
-
-            ORDER BY RANDOM()
-
-            LIMIT ${count};
-        `);
-
-    if (
-        segmentResult.length < count
-    ) {
-        throw new Error(
-            `Only ${segmentResult.length} usable segments are available`,
-        );
+    if (candidates.length === 0) {
+        throw new Error("No usable road segments are available for this city");
     }
 
-    const generatedVehicles:
-        GeneratedVehicle[] = [];
+    const reachableByStart = new Map<number, number[]>();
+    const plans: VehiclePlan[] = [];
 
-    /*
-     * Generate each vehicle independently.
-     */
-    for (const row of segmentResult) {
-        const segment =
-            row as unknown as SelectedSegment;
+    // Try candidates until enough valid route plans are found.
+    for (const candidate of candidates) {
+        if (plans.length >= count) break;
 
-        const startIntersectionId =
-            Number(
-                segment.startIntersectionId,
-            );
+        const startIntersectionId = candidate.startIntersectionId;
+        let reachable = reachableByStart.get(startIntersectionId);
 
-        /*
-         * --------------------------------------------
-         * Find all intersections reachable from the
-         * starting intersection.
-         * --------------------------------------------
-         */
-        const reachableIntersections =
-            await getReachableIntersections(
+        if (!reachable) {
+            reachable = await getReachableIntersections(
                 cityId,
                 startIntersectionId,
             );
-
-        /*
-         * Don't choose the starting intersection
-         * as the destination.
-         */
-        const possibleDestinations =
-            reachableIntersections.filter(
-                (id) =>
-                    id !==
-                    startIntersectionId,
-            );
-
-        if (
-            possibleDestinations.length ===
-            0
-        ) {
-            console.log(
-                `No reachable destination from ` +
-                `${startIntersectionId}. ` +
-                `Skipping vehicle.`,
-            );
-
-            continue;
+            reachableByStart.set(startIntersectionId, reachable);
         }
 
-        /*
-         * Choose a random destination.
-         */
-        const destinationIntersectionId =
-            possibleDestinations[
-            Math.floor(
-                Math.random() *
-                possibleDestinations.length,
-            )
-            ];
+        const destinations = reachable.filter(
+            (intersectionId) => intersectionId !== startIntersectionId,
+        );
+        if (destinations.length === 0) continue;
 
-        /*
-         * --------------------------------------------
-         * Calculate the shortest route.
-         * --------------------------------------------
-         *
-         * Every route segment now contains:
-         *
-         *     segmentId
-         *     isReverse
-         */
-        const route =
-            await findShortestRoute(
+        // Try multiple reachable destinations for this start before skipping it.
+        const shuffledDestinations = [...destinations];
+        for (let i = shuffledDestinations.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [shuffledDestinations[i], shuffledDestinations[j]] =
+                [shuffledDestinations[j], shuffledDestinations[i]];
+        }
+
+        let planForCandidate: VehiclePlan | null = null;
+
+        for (const destinationIntersectionId of shuffledDestinations) {
+            const route = await findShortestRoute(
                 cityId,
                 startIntersectionId,
                 destinationIntersectionId,
             );
 
-        if (
-            !route ||
-            route.segments.length === 0
-        ) {
-            console.log(
-                `No route found from ` +
-                `${startIntersectionId} to ` +
-                `${destinationIntersectionId}. ` +
-                `Skipping vehicle.`,
-            );
+            if (!route || route.segments.length === 0) continue;
 
-            continue;
-        }
+            const firstRouteSegment = route.segments[0];
+            const initialGeometryProgress =
+                firstRouteSegment.isReverse ? 1 : 0;
 
-        /*
-         * First route segment.
-         */
-        const firstRouteSegment =
-            route.segments[0];
-
-        const firstSegmentId =
-            firstRouteSegment.segmentId;
-
-        const firstSegmentIsReverse =
-            firstRouteSegment.isReverse;
-
-        /*
-         * --------------------------------------------
-         * Get first segment information and calculate
-         * the initial vehicle position.
-         * --------------------------------------------
-         *
-         * Forward:
-         *
-         *     geometry progress = 0
-         *
-         * Reverse:
-         *
-         *     geometry progress = 1
-         */
-        const initialGeometryProgress =
-            firstSegmentIsReverse
-                ? 1
-                : 0;
-
-        const positionResult =
-            await db.execute(sql`
+            const positionResult = await db.execute(sql`
                 SELECT
                     r.id AS "roadId",
-
                     rs.id AS "segmentId",
-
-                    rs.speed_limit_kmh
-                        AS "speedLimitKmh",
-
+                    rs.speed_limit_kmh AS "speedLimitKmh",
                     ST_AsGeoJSON(
                         ST_LineInterpolatePoint(
                             rs.geometry,
                             ${initialGeometryProgress}
                         )
                     )::json AS position
-
                 FROM road_segments rs
-
-                JOIN roads r
-                    ON r.id = rs.road_id
-
-                WHERE rs.id =
-                    ${firstSegmentId}
-
+                JOIN roads r ON r.id = rs.road_id
+                WHERE rs.id = ${firstRouteSegment.segmentId}
+                  AND r.city_id = ${cityId}
                 LIMIT 1;
             `);
 
-        const firstSegment =
-            positionResult[0];
+            if (positionResult.length === 0) continue;
 
-        const geometry =
-            firstSegment?.position;
+            const row = positionResult[0] as unknown as {
+                roadId: number | string;
+                segmentId: number | string;
+                speedLimitKmh: number | string | null;
+                position: unknown;
+            };
 
-        if (!geometry) {
-            console.log(
-                `No geometry found for segment ` +
-                `${firstSegmentId}. ` +
-                `Skipping vehicle.`,
-            );
+            let geometry = row.position;
+            if (typeof geometry === "string") {
+                try {
+                    geometry = JSON.parse(geometry);
+                } catch {
+                    continue;
+                }
+            }
+            if (!geometry || typeof geometry !== "object") continue;
 
-            continue;
+            const rawSpeedLimit =
+                row.speedLimitKmh === null
+                    ? NaN
+                    : Number(row.speedLimitKmh);
+            const speedKmh =
+                Number.isFinite(rawSpeedLimit) && rawSpeedLimit > 0
+                    ? rawSpeedLimit
+                    : 30;
+
+            planForCandidate = {
+                route,
+                destinationIntersectionId,
+                firstSegmentId: Number(row.segmentId),
+                firstSegmentIsReverse: firstRouteSegment.isReverse,
+                firstRoadId: Number(row.roadId),
+                speedKmh,
+                geometry,
+            };
+            break;
         }
 
-        /*
-         * --------------------------------------------
-         * Determine vehicle speed.
-         *
-         * Use segment speed limit when available.
-         * Otherwise use 30 km/h.
-         * --------------------------------------------
-         */
-        const speedLimit =
-            firstSegment.speedLimitKmh !==
-                null
-                ? Number(
-                    firstSegment.speedLimitKmh,
-                )
-                : 30;
+        if (planForCandidate) plans.push(planForCandidate);
+    }
 
-        /*
-         * --------------------------------------------
-         * Create vehicle.
-         * --------------------------------------------
-         */
-        const vehicle = await db.transaction(async (tx) => {
-            /*
-             * Create the vehicle and its initial state.
-             *
-             * routeSequence = 0 because the first route
-             * entry also uses sequence = 0.
-             */
+    if (plans.length < count) {
+        throw new Error(
+            `Could generate only ${plans.length} valid vehicle routes; ` +
+            `${count} were requested. No vehicles were inserted. ` +
+            `Check network connectivity and usable road segments.`,
+        );
+    }
+
+    // Insert the complete batch atomically so a database error does not leave
+    // a partially generated fleet behind.
+    return db.transaction(async (tx) => {
+        const generatedVehicles: GeneratedVehicle[] = [];
+
+        for (const plan of plans.slice(0, count)) {
             const vehicleResult = await tx.execute(sql`
-        INSERT INTO vehicles (
-            simulation_run_id,
-            current_road_id,
-            current_segment_id,
-            destination_intersection_id,
-            route_sequence,
-            position,
-            speed_kmh,
-            progress,
-            status
-        )
-        VALUES (
-            ${simulationRunId},
-            ${firstSegment.roadId},
-            ${firstSegmentId},
-            ${destinationIntersectionId},
-            0,
-            ST_SetSRID(
-                ST_GeomFromGeoJSON(
-                    ${JSON.stringify(geometry)}
-                ),
-                4326
-            ),
-            ${speedLimit},
-            0,
-            'WAITING'
-        )
-        RETURNING
-            id,
-            simulation_run_id AS "simulationRunId",
-            current_road_id AS "currentRoadId",
-            current_segment_id AS "currentSegmentId",
-            destination_intersection_id AS "destinationIntersectionId",
-            route_sequence AS "routeSequence",
-            speed_kmh AS "speedKmh",
-            status;
-    `);
+                INSERT INTO vehicles (
+                    simulation_run_id,
+                    current_road_id,
+                    current_segment_id,
+                    destination_intersection_id,
+                    route_sequence,
+                    position,
+                    speed_kmh,
+                    progress,
+                    status
+                )
+                VALUES (
+                    ${simulationRunId},
+                    ${plan.firstRoadId},
+                    ${plan.firstSegmentId},
+                    ${plan.destinationIntersectionId},
+                    0,
+                    ST_SetSRID(
+                        ST_GeomFromGeoJSON(${JSON.stringify(plan.geometry)}),
+                        4326
+                    ),
+                    ${plan.speedKmh},
+                    ${plan.firstSegmentIsReverse ? 1 : 0},
+                    'MOVING'
+                )
+                RETURNING
+                    id,
+                    simulation_run_id AS "simulationRunId",
+                    current_road_id AS "currentRoadId",
+                    current_segment_id AS "currentSegmentId",
+                    destination_intersection_id AS "destinationIntersectionId",
+                    route_sequence AS "routeSequence",
+                    speed_kmh AS "speedKmh",
+                    status;
+            `);
 
             if (vehicleResult.length === 0) {
                 throw new Error(
-                    `Failed to create vehicle for segment ${firstSegmentId}`,
+                    `Failed to create vehicle for segment ${plan.firstSegmentId}`,
                 );
             }
 
-            const vehicle =
-                vehicleResult[0] as unknown as GeneratedVehicle;
+            const vehicle = vehicleResult[0] as unknown as GeneratedVehicle;
 
-            /*
-             * Store the complete route.
-             *
-             * The route is intentionally 0-based:
-             *
-             * 0 → first segment
-             * 1 → second segment
-             * 2 → third segment
-             */
             await tx.insert(vehicleRoutes).values(
-                route.segments.map(
-                    (routeSegment, sequence) => ({
-                        vehicleId: vehicle.id,
-                        segmentId: routeSegment.segmentId,
-                        sequence,
-                        isReverse: routeSegment.isReverse,
-                    }),
-                ),
+                plan.route.segments.map((routeSegment, sequence) => ({
+                    vehicleId: vehicle.id,
+                    segmentId: routeSegment.segmentId,
+                    sequence,
+                    isReverse: routeSegment.isReverse,
+                })),
             );
 
-            /*
-             * If either INSERT fails, the entire transaction
-             * is rolled back.
-             */
-            return vehicle;
-        });
+            generatedVehicles.push(vehicle);
+        }
 
-        generatedVehicles.push(vehicle);
-    }
-    return generatedVehicles;
+        return generatedVehicles;
+    });
 }

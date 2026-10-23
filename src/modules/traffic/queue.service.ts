@@ -59,7 +59,9 @@ export function detectTrafficQueues(
         if (
             vehicle.status !== "WAITING" &&
             vehicle.status !==
-                "WAITING_AT_SIGNAL"
+                "WAITING_AT_SIGNAL" &&
+            vehicle.status !==
+                "WAITING_BEHIND_VEHICLE"
         ) {
             continue;
         }
@@ -76,6 +78,8 @@ export function detectTrafficQueues(
         if (
             vehicle.status !==
                 "WAITING_AT_SIGNAL" &&
+            vehicle.status !==
+                "WAITING_BEHIND_VEHICLE" &&
             vehicle.speedKmh >
                 QUEUE_STOP_SPEED_KMH
         ) {

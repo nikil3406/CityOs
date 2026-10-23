@@ -27,6 +27,7 @@ import {
 
 import {
     clearSimulationVehicleCache,
+    getSimulationVehicleCache,
 } from "../vehicle/vehicle_simulation_cache.service";
 
 import {
@@ -49,6 +50,7 @@ import {
 
 import {
     getPreviousSevereState,
+    getPreviousSevereSegmentIds,
     setPreviousSevereState,
     clearCongestionEventState,
 } from "@/modules/traffic/congestion_event_state.service";
@@ -61,478 +63,383 @@ class SimulationEngine {
             NodeJS.Timeout
         >();
 
+    // Locks startup while asynchronous state initialization is running.
+    private starting = new Set<number>();
+
+    // Prevents asynchronous interval callbacks from overlapping per simulation.
+    private activeTicks = new Set<number>();
+
+    // Records stop requests made while startup is still in progress.
+    private stopRequested = new Set<number>();
+
+    // Remembers the city so stop/cleanup does not need an asynchronous DB lookup.
+    private cityBySimulation = new Map<number, number>();
+
+    // Traffic-light runtime state is cached per city, so only one simulation may
+    // own a city's runtime cache in this engine process at a time.
+    private simulationByCity = new Map<number, number>();
+
+    // Defers cleanup until an already-running tick finishes.
+    private cleanupPending = new Set<number>();
+
 
     async start(
         simulationId: number,
     ) {
-        /*
-         * Prevent starting the same
-         * simulation twice.
-         */
+        // A timer is registered only after asynchronous initialization finishes.
+        // The startup lock prevents two callers from initializing concurrently.
         if (
-            this.timers.has(
-                simulationId,
-            )
+            this.timers.has(simulationId) ||
+            this.starting.has(simulationId) ||
+            this.activeTicks.has(simulationId) ||
+            this.cleanupPending.has(simulationId)
         ) {
             return;
         }
 
-        const simulation =
-            await getSimulationRun(
-                simulationId,
-            );
+        this.starting.add(simulationId);
+        this.stopRequested.delete(simulationId);
+        let cityId: number | undefined;
+        let ownsCityReservation = false;
 
-        if (!simulation) {
-            throw new Error(
-                "Simulation run not found",
-            );
-        }
+        try {
+            const simulation =
+                await getSimulationRun(simulationId);
 
-        if (
-            simulation.status !==
-            "RUNNING"
-        ) {
-            throw new Error(
-                `Simulation is not RUNNING. Current status: ${simulation.status}`,
-            );
-        }
+            if (!simulation) {
+                throw new Error("Simulation run not found");
+            }
 
-        /*
-         * --------------------------------------------------
-         * Initialize high-frequency simulation state.
-         * --------------------------------------------------
-         *
-         * Vehicle state:
-         *     PostgreSQL → RAM
-         *
-         * Traffic lights:
-         *     PostgreSQL → RAM
-         *
-         * These happen once when the simulation starts.
-         */
-        await initializeSimulationVehicleStates(
-            simulationId,
-        );
+            if (simulation.status !== "RUNNING") {
+                throw new Error(
+                    `Simulation is not RUNNING. Current status: ${simulation.status}`,
+                );
+            }
 
-        /*
-         * Always reload traffic-light config from the DB
-         * on simulation start so that any DB changes
-         * (e.g. phase configuration in tests) are picked up.
-         */
-        clearTrafficLightCache(
-            simulation.cityId,
-        );
+            cityId = simulation.cityId;
 
-        await initializeTrafficLights(
-            simulation.cityId,
-        );
+            const existingSimulationId =
+                this.simulationByCity.get(cityId);
 
-        const timer =
-            setInterval(
-                async () => {
-                    try {
-                        const current =
-                            await getSimulationRun(
-                                simulationId,
-                            );
+            if (
+                existingSimulationId !== undefined &&
+                existingSimulationId !== simulationId
+            ) {
+                throw new Error(
+                    `City ${cityId} already has active simulation ${existingSimulationId}. ` +
+                    `Stop that simulation before starting ${simulationId}.`,
+                );
+            }
 
-                        if (!current) {
-                            this.stop(
-                                simulationId,
-                            );
+            this.simulationByCity.set(cityId, simulationId);
+            ownsCityReservation = true;
+            this.cityBySimulation.set(simulationId, cityId);
 
-                            return;
-                        }
+            await initializeSimulationVehicleStates(simulationId);
 
-                        if (
-                            current.status !==
-                            "RUNNING"
-                        ) {
-                            this.stop(
-                                simulationId,
-                            );
+            // Reload signal configuration when starting a simulation.
+            clearTrafficLightCache(simulation.cityId);
+            await initializeTrafficLights(simulation.cityId);
 
-                            return;
-                        }
+            // stop() can be called while either initialization call is awaiting I/O.
+            const latestSimulation =
+                await getSimulationRun(simulationId);
 
-                        /*
-                         * Advance simulation clock.
-                         */
-                        const updated =
-                            await advanceSimulationTime(
-                                simulationId,
-                            );
+            if (
+                this.stopRequested.has(simulationId) ||
+                !latestSimulation ||
+                latestSimulation.status !== "RUNNING"
+            ) {
+                this.clearSimulationRuntimeState(simulationId, cityId);
+                this.cityBySimulation.delete(simulationId);
+                this.releaseCityReservation(simulationId, cityId);
+                this.cleanupPending.delete(simulationId);
+                return;
+            }
 
-                        /*
-                         * Update traffic-light
-                         * runtime state.
-                         *
-                         * This now uses RAM.
-                         */
-                        if (updated) {
-                            await updateTrafficLights(
-                                updated.cityId,
-                            );
-                        }
+            const timer = setInterval(async () => {
+                // setInterval does not await an async callback. Skip a tick if the
+                // previous tick for this simulation is still running.
+                if (this.activeTicks.has(simulationId)) {
+                    return;
+                }
 
-                        /*
-                         * Move vehicles.
-                         *
-                         * Vehicle discovery now
-                         * comes from RAM.
-                         */
-                        const movedVehicles =
-                            await moveVehicles(
-                                simulationId,
-                            );
+                this.activeTicks.add(simulationId);
 
-                        /*
-                         * Detect traffic queues
-                         * after vehicle movement.
-                         */
-                        const queues =
-                            detectTrafficQueues(
-                                simulationId,
-                            );
+                try {
+                    const current =
+                        await getSimulationRun(simulationId);
 
-                        const hadQueues =
-                            getPreviousQueueState(
-                                simulationId,
-                            );
+                    if (!current || current.status !== "RUNNING") {
+                        this.stop(simulationId);
+                        return;
+                    }
 
-                        const hasQueues =
-                            queues.length > 0;
+                    const updated =
+                        await advanceSimulationTime(simulationId);
 
-                        if (
-                            !hadQueues &&
-                            hasQueues &&
-                            updated
-                        ) {
+                    if (updated) {
+                        await updateTrafficLights(updated.cityId);
+                    }
+
+                    const movedVehicles = await moveVehicles(simulationId);
+                    const queues = detectTrafficQueues(simulationId);
+                    const hadQueues = getPreviousQueueState(simulationId);
+                    const hasQueues = queues.length > 0;
+
+                    if (!hadQueues && hasQueues && updated) {
+                        await recordSimulationEvent({
+                            simulationRunId: simulationId,
+                            type: "TRAFFIC_QUEUE_STARTED",
+                            simulationTime: updated.simulationTime,
+                            data: {
+                                queueCount: queues.length,
+                                maximumQueueVehicles: Math.max(
+                                    ...queues.map((queue) => queue.vehicleCount),
+                                ),
+                                averageQueueLengthMeters:
+                                    queues.reduce(
+                                        (sum, queue) => sum + queue.queueLengthMeters,
+                                        0,
+                                    ) / queues.length,
+                            },
+                        });
+                    }
+
+                    if (hadQueues && !hasQueues && updated) {
+                        await recordSimulationEvent({
+                            simulationRunId: simulationId,
+                            type: "TRAFFIC_QUEUE_CLEARED",
+                            simulationTime: updated.simulationTime,
+                        });
+                    }
+
+                    setPreviousQueueState(simulationId, hasQueues);
+
+                    // Snapshot prior severe segments before updating their states.
+                    // A segment with no active vehicles is omitted by
+                    // calculateSegmentCongestion(), so it must be handled below.
+                    const previouslySevereSegmentIds =
+                        getPreviousSevereSegmentIds(simulationId);
+
+                    const congestion = calculateSegmentCongestion(simulationId);
+                    const currentSegmentIds = new Set(
+                        congestion.map((segment) => segment.segmentId),
+                    );
+
+                    for (const segment of congestion) {
+                        const isSevere = segment.congestionLevel === "SEVERE";
+                        const wasSevere = getPreviousSevereState(
+                            simulationId,
+                            segment.segmentId,
+                        );
+
+                        if (!wasSevere && isSevere && updated) {
                             await recordSimulationEvent({
-                                simulationRunId:
-                                    simulationId,
-
-                                type:
-                                    "TRAFFIC_QUEUE_STARTED",
-
-                                simulationTime:
-                                    updated.simulationTime,
-
+                                simulationRunId: simulationId,
+                                type: "CONGESTION_DETECTED",
+                                roadId: segment.roadId,
+                                simulationTime: updated.simulationTime,
                                 data: {
-                                    queueCount:
-                                        queues.length,
-
-                                    maximumQueueVehicles:
-                                        Math.max(
-                                            ...queues.map(
-                                                (queue) =>
-                                                    queue.vehicleCount,
-                                            ),
-                                        ),
-
-                                    averageQueueLengthMeters:
-                                        queues.reduce(
-                                            (sum, queue) =>
-                                                sum +
-                                                queue.queueLengthMeters,
-                                            0,
-                                        ) / queues.length,
+                                    segmentId: segment.segmentId,
+                                    roadId: segment.roadId,
+                                    vehicleCount: segment.vehicleCount,
+                                    averageSpeedKmh: segment.averageSpeedKmh,
+                                    speedLimitKmh: segment.speedLimitKmh,
+                                    speedRatio: segment.speedRatio,
+                                    queueVehicleCount: segment.queueVehicleCount,
+                                    queueLengthMeters: segment.queueLengthMeters,
+                                    congestionLevel: segment.congestionLevel,
                                 },
                             });
                         }
 
-                        if (
-                            hadQueues &&
-                            !hasQueues &&
-                            updated
-                        ) {
+                        if (wasSevere && !isSevere && updated) {
                             await recordSimulationEvent({
-                                simulationRunId:
-                                    simulationId,
-
-                                type:
-                                    "TRAFFIC_QUEUE_CLEARED",
-
-                                simulationTime:
-                                    updated.simulationTime,
+                                simulationRunId: simulationId,
+                                type: "CONGESTION_CLEARED",
+                                roadId: segment.roadId,
+                                simulationTime: updated.simulationTime,
+                                data: {
+                                    segmentId: segment.segmentId,
+                                    roadId: segment.roadId,
+                                    previousLevel: "SEVERE",
+                                    currentLevel: segment.congestionLevel,
+                                    vehicleCount: segment.vehicleCount,
+                                    averageSpeedKmh: segment.averageSpeedKmh,
+                                    queueVehicleCount: segment.queueVehicleCount,
+                                    queueLengthMeters: segment.queueLengthMeters,
+                                },
                             });
                         }
 
-                        setPreviousQueueState(
+                        setPreviousSevereState(
                             simulationId,
-                            hasQueues,
-                        );
-
-                        /*
- * --------------------------------------------------
- * Detect severe congestion.
- *
- * Congestion is evaluated per road segment.
- * Only transitions into/out of SEVERE are
- * recorded as simulation events.
- * --------------------------------------------------
- */
-
-                        const congestion =
-                            calculateSegmentCongestion(
-                                simulationId,
-                            );
-
-                        for (const segment of congestion) {
-                            const isSevere =
-                                segment.congestionLevel ===
-                                "SEVERE";
-
-                            const wasSevere =
-                                getPreviousSevereState(
-                                    simulationId,
-                                    segment.segmentId,
-                                );
-
-                            /*
-                             * --------------------------------------------------
-                             * SEVERE CONGESTION STARTED
-                             * --------------------------------------------------
-                             */
-
-                            if (
-                                !wasSevere &&
-                                isSevere &&
-                                updated
-                            ) {
-                                await recordSimulationEvent({
-                                    simulationRunId:
-                                        simulationId,
-
-                                    type:
-                                        "CONGESTION_DETECTED",
-
-                                    roadId:
-                                        segment.roadId,
-
-                                    simulationTime:
-                                        updated.simulationTime,
-
-                                    data: {
-                                        segmentId:
-                                            segment.segmentId,
-
-                                        roadId:
-                                            segment.roadId,
-
-                                        vehicleCount:
-                                            segment.vehicleCount,
-
-                                        averageSpeedKmh:
-                                            segment.averageSpeedKmh,
-
-                                        speedLimitKmh:
-                                            segment.speedLimitKmh,
-
-                                        speedRatio:
-                                            segment.speedRatio,
-
-                                        queueVehicleCount:
-                                            segment.queueVehicleCount,
-
-                                        queueLengthMeters:
-                                            segment.queueLengthMeters,
-
-                                        congestionLevel:
-                                            segment.congestionLevel,
-                                    },
-                                });
-                            }
-
-                            /*
-                             * --------------------------------------------------
-                             * SEVERE CONGESTION CLEARED
-                             * --------------------------------------------------
-                             */
-
-                            if (
-                                wasSevere &&
-                                !isSevere &&
-                                updated
-                            ) {
-                                await recordSimulationEvent({
-                                    simulationRunId:
-                                        simulationId,
-
-                                    type:
-                                        "CONGESTION_CLEARED",
-
-                                    roadId:
-                                        segment.roadId,
-
-                                    simulationTime:
-                                        updated.simulationTime,
-
-                                    data: {
-                                        segmentId:
-                                            segment.segmentId,
-
-                                        roadId:
-                                            segment.roadId,
-
-                                        previousLevel:
-                                            "SEVERE",
-
-                                        currentLevel:
-                                            segment.congestionLevel,
-
-                                        vehicleCount:
-                                            segment.vehicleCount,
-
-                                        averageSpeedKmh:
-                                            segment.averageSpeedKmh,
-
-                                        queueVehicleCount:
-                                            segment.queueVehicleCount,
-
-                                        queueLengthMeters:
-                                            segment.queueLengthMeters,
-                                    },
-                                });
-                            }
-
-                            /*
-                             * Remember the current state for
-                             * the next simulation tick.
-                             */
-
-                            setPreviousSevereState(
-                                simulationId,
-                                segment.segmentId,
-                                isSevere,
-                            );
-                        }
-
-                        /*
- * Calculate current traffic metrics
- * from runtime simulation state.
- *
- * Metrics are not persisted every tick.
- * They will be exposed through the
- * live simulation state API.
- */
-
-                        console.log(
-                            `Simulation ${simulationId}: ` +
-                            `${updated?.simulationTime}s | ` +
-                            `Moved vehicles: ${movedVehicles}`,
-                        );
-
-                    } catch (error) {
-                        console.error(
-                            `Simulation ${simulationId} tick failed:`,
-                            error,
-                        );
-
-                        this.stop(
-                            simulationId,
+                            segment.segmentId,
+                            isSevere,
                         );
                     }
-                },
-                SimulationConfig
-                    .tickIntervalMs,
+
+                    // A previously severe segment that is absent from the current
+                    // results has no active vehicles (or no current congestion row).
+                    // Record the transition explicitly instead of leaving it severe
+                    // forever in the event-state cache.
+                    const vehicleCache =
+                        getSimulationVehicleCache(simulationId);
+
+                    for (const segmentId of previouslySevereSegmentIds) {
+                        if (currentSegmentIds.has(segmentId)) {
+                            continue;
+                        }
+
+                        const cachedSegment =
+                            vehicleCache?.segments.get(segmentId);
+
+                        if (updated) {
+                            await recordSimulationEvent({
+                                simulationRunId: simulationId,
+                                type: "CONGESTION_CLEARED",
+                                roadId: cachedSegment?.roadId,
+                                simulationTime: updated.simulationTime,
+                                data: {
+                                    segmentId,
+                                    roadId: cachedSegment?.roadId ?? null,
+                                    previousLevel: "SEVERE",
+                                    currentLevel: "FREE",
+                                    vehicleCount: 0,
+                                    averageSpeedKmh: 0,
+                                    queueVehicleCount: 0,
+                                    queueLengthMeters: 0,
+                                    reason: "NO_ACTIVE_VEHICLES_ON_SEGMENT",
+                                },
+                            });
+                        }
+
+                        setPreviousSevereState(
+                            simulationId,
+                            segmentId,
+                            false,
+                        );
+                    }
+
+                    console.log(
+                        `Simulation ${simulationId}: ` +
+                        `${updated?.simulationTime}s | ` +
+                        `Moved vehicles: ${movedVehicles}`,
+                    );
+                } catch (error) {
+                    console.error(
+                        `Simulation ${simulationId} tick failed:`,
+                        error,
+                    );
+                    this.stop(simulationId);
+                } finally {
+                    this.activeTicks.delete(simulationId);
+
+                    // stop() defers cleanup while a tick is active so the tick
+                    // cannot continue using caches that were cleared mid-update.
+                    if (this.cleanupPending.delete(simulationId)) {
+                        const activeCityId =
+                            this.cityBySimulation.get(simulationId);
+
+                        this.clearSimulationRuntimeState(
+                            simulationId,
+                            activeCityId,
+                        );
+                        this.cityBySimulation.delete(simulationId);
+                        this.releaseCityReservation(
+                            simulationId,
+                            activeCityId,
+                        );
+                    }
+                }
+            }, SimulationConfig.tickIntervalMs);
+
+            this.timers.set(simulationId, timer);
+
+            console.log(
+                `Simulation ${simulationId} started ` +
+                `(${SimulationConfig.tickIntervalMs}ms real time = ` +
+                `${SimulationConfig.simulationSecondsPerTick}s simulation time)`,
             );
-
-        this.timers.set(
-            simulationId,
-            timer,
-        );
-
-        console.log(
-            `Simulation ${simulationId} started ` +
-            `(${SimulationConfig.tickIntervalMs}ms real time = ` +
-            `${SimulationConfig.simulationSecondsPerTick}s simulation time)`,
-        );
+        } catch (error) {
+            // Only clean up city-level state if this simulation acquired the
+            // reservation. A rejected second simulation must not clear the
+            // active simulation's traffic-light cache.
+            if (ownsCityReservation) {
+                this.clearSimulationRuntimeState(simulationId, cityId);
+                this.cityBySimulation.delete(simulationId);
+                this.releaseCityReservation(simulationId, cityId);
+            }
+            this.cleanupPending.delete(simulationId);
+            throw error;
+        } finally {
+            this.starting.delete(simulationId);
+            this.stopRequested.delete(simulationId);
+        }
     }
-
 
     stop(
         simulationId: number,
     ) {
-        const timer =
-            this.timers.get(
-                simulationId,
-            );
+        if (this.starting.has(simulationId)) {
+            this.stopRequested.add(simulationId);
+        }
 
-        if (!timer) {
-            clearSimulationVehicleCache(
-                simulationId,
-            );
+        const timer = this.timers.get(simulationId);
 
-            clearSimulationVehicleStates(
-                simulationId,
-            );
+        if (timer) {
+            clearInterval(timer);
+            this.timers.delete(simulationId);
+        }
 
+        // Do not clear state while a tick is actively reading/updating it.
+        // The tick's finally block performs cleanup as soon as it exits.
+        if (this.activeTicks.has(simulationId)) {
+            this.cleanupPending.add(simulationId);
+            console.log(
+                `Simulation ${simulationId} stopping after current tick`,
+            );
             return;
         }
 
-        clearInterval(
-            timer,
-        );
+        const cityId = this.cityBySimulation.get(simulationId);
+        this.clearSimulationRuntimeState(simulationId, cityId);
+        this.cityBySimulation.delete(simulationId);
+        this.releaseCityReservation(simulationId, cityId);
+        this.cleanupPending.delete(simulationId);
 
-        this.timers.delete(
-            simulationId,
-        );
-
-        /*
-         * Clear simulation-local caches.
-         */
-        clearSimulationVehicleCache(
-            simulationId,
-        );
-
-        clearQueueEventState(
-            simulationId,
-        );
-
-        clearSimulationVehicleStates(
-            simulationId,
-        );
-
-        clearCongestionEventState(
-            simulationId,
-        );
-
-        /*
-         * Traffic-light cache is city-scoped
-         * in the current single-simulation
-         * architecture.
-         *
-         * We need the simulation information
-         * to know which city to clear.
-         */
-        void this.clearTrafficLightCache(
-            simulationId,
-        );
-
-        console.log(
-            `Simulation ${simulationId} engine stopped`,
-        );
+        if (timer) {
+            console.log(`Simulation ${simulationId} engine stopped`);
+        }
     }
 
-
-    private async clearTrafficLightCache(
+    private releaseCityReservation(
         simulationId: number,
+        cityId?: number,
     ) {
-        const simulation =
-            await getSimulationRun(
-                simulationId,
-            );
-
-        if (!simulation) {
+        if (cityId === undefined) {
             return;
         }
 
-        clearTrafficLightCache(
-            simulation.cityId,
-        );
+        if (this.simulationByCity.get(cityId) === simulationId) {
+            this.simulationByCity.delete(cityId);
+        }
     }
 
+    private clearSimulationRuntimeState(
+        simulationId: number,
+        cityId?: number,
+    ) {
+        clearSimulationVehicleCache(simulationId);
+        clearQueueEventState(simulationId);
+        clearSimulationVehicleStates(simulationId);
+        clearCongestionEventState(simulationId);
+
+        if (cityId !== undefined) {
+            clearTrafficLightCache(cityId);
+        }
+    }
 
     isRunning(
         simulationId: number,

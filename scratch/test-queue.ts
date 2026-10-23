@@ -1,7 +1,7 @@
 ﻿import "dotenv/config";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { sql, eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import * as schema from "../src/db/schema/index";
 
 const client = postgres(
@@ -15,16 +15,13 @@ const BASE_URL = "http://localhost:3000";
 const CITY_ID = 1;
 
 /*
- * Traffic-light configuration
- *
- * RED  = 20 seconds
- * GREEN = 20 seconds
- *
- * This gives the long-running test enough time
- * to observe several complete signal cycles.
+ * Use the production six-phase, 66-second cycle. This test must not
+ * replace production phases or movement states with a test-only cycle.
  */
-const RED_DURATION = 20;
-const GREEN_DURATION = 20;
+const PHASE_DURATIONS = [20, 3, 20, 3, 10, 10] as const;
+const TRAFFIC_LIGHT_CYCLE_SECONDS = 66;
+const QUEUE_WAIT_TIMEOUT_MS = 60_000;
+const GREEN_WAIT_TIMEOUT_MS = 90_000;
 
 /*
  * Vehicle configuration
@@ -64,6 +61,8 @@ type ApproachSegment = {
     trafficLightId: number;
     nextSegmentId: number;
     nextRoadId: number;
+    redPhaseNumber: number;
+    greenPhaseNumber: number;
 };
 
 type SpawnedVehicle = {
@@ -330,59 +329,83 @@ async function findApproachSegments(): Promise<
         const trafficLightId =
             Number(row.trafficLightId);
 
-        const nextRows =
-            await db.execute(sql`
-                SELECT
-                    rs.id AS "segmentId",
-                    rs.road_id AS "roadId"
-                FROM road_segments rs
-                WHERE
-                    rs.start_intersection_id =
-                        ${intersectionId}
-                    AND rs.id <> ${segmentId}
-                LIMIT 1;
-            `);
-
-        if (nextRows.length === 0) {
+        // Test each traffic light only once.
+        if (candidates.some((item) => item.trafficLightId === trafficLightId)) {
             continue;
         }
 
-        const next =
-            nextRows[0] as any;
+        const nextRows = await db.execute(sql`
+            SELECT rs.id AS "segmentId", rs.road_id AS "roadId"
+            FROM road_segments rs
+            WHERE rs.start_intersection_id = ${intersectionId}
+                AND rs.id <> ${segmentId}
+            ORDER BY rs.id;
+        `);
+
+        let selected: {
+            segmentId: number;
+            roadId: number;
+            redPhaseNumber: number;
+            greenPhaseNumber: number;
+        } | null = null;
+
+        for (const nextRow of nextRows as any[]) {
+            const nextSegmentId = Number(nextRow.segmentId);
+            const nextRoadId = Number(nextRow.roadId);
+
+            const movementRows = await db.execute(sql`
+                SELECT phase_number AS "phaseNumber", state
+                FROM traffic_light_movements
+                WHERE traffic_light_id = ${trafficLightId}
+                    AND from_road_id = ${roadId}
+                    AND to_road_id = ${nextRoadId}
+                ORDER BY phase_number;
+            `);
+
+            const states = (movementRows as any[]).map((item) => ({
+                phaseNumber: Number(item.phaseNumber),
+                state: String(item.state).toUpperCase(),
+            }));
+
+            const redStates = states.filter((item) => item.state === "RED");
+            const greenStates = states.filter((item) => item.state === "GREEN");
+
+            for (const red of redStates) {
+                const nextGreen =
+                    greenStates.find((item) => item.phaseNumber > red.phaseNumber) ??
+                    greenStates[0];
+
+                if (nextGreen) {
+                    selected = {
+                        segmentId: nextSegmentId,
+                        roadId: nextRoadId,
+                        redPhaseNumber: red.phaseNumber,
+                        greenPhaseNumber: nextGreen.phaseNumber,
+                    };
+                    break;
+                }
+            }
+
+            if (selected) break;
+        }
+
+        if (!selected) continue;
 
         candidates.push({
             segmentId,
             roadId,
             lengthMeters,
             intersectionId,
-
             speedLimitKmh:
-                row.speedLimitKmh === null
-                    ? null
-                    : Number(
-                          row.speedLimitKmh,
-                      ),
-
+                row.speedLimitKmh === null ? null : Number(row.speedLimitKmh),
             trafficLightId,
-
-            nextSegmentId:
-                Number(
-                    next.segmentId,
-                ),
-
-            nextRoadId:
-                Number(
-                    next.roadId,
-                ),
+            nextSegmentId: selected.segmentId,
+            nextRoadId: selected.roadId,
+            redPhaseNumber: selected.redPhaseNumber,
+            greenPhaseNumber: selected.greenPhaseNumber,
         });
 
-        /*
-         * Two independent approaches are
-         * enough for the multi-segment test.
-         */
-        if (candidates.length >= 2) {
-            break;
-        }
+        if (candidates.length >= 2) break;
     }
 
     return candidates;
@@ -396,116 +419,65 @@ async function findApproachSegments(): Promise<
 async function configureTrafficLight(
     approach: ApproachSegment,
 ): Promise<void> {
-    const trafficLightId =
-        approach.trafficLightId;
+    // Preserve all six production phases and all generated movement states.
+    const phaseRows = await db.execute(sql`
+        SELECT phase_number AS "phaseNumber", duration_seconds AS "durationSeconds"
+        FROM traffic_light_phases
+        WHERE traffic_light_id = ${approach.trafficLightId}
+        ORDER BY phase_number;
+    `);
+
+    assert(
+        phaseRows.length === 6,
+        `Traffic light ${approach.trafficLightId} must have six phases; found ${phaseRows.length}`,
+    );
+
+    const durations = (phaseRows as any[]).map((phase) => Number(phase.durationSeconds));
+    assert(
+        durations.every((duration, index) => duration === PHASE_DURATIONS[index]),
+        `Traffic light ${approach.trafficLightId} has unexpected phase durations: ${durations.join(", ")}`,
+    );
+
+    const movementRows = await db.execute(sql`
+        SELECT phase_number AS "phaseNumber", state
+        FROM traffic_light_movements
+        WHERE traffic_light_id = ${approach.trafficLightId}
+            AND from_road_id = ${approach.roadId}
+            AND to_road_id = ${approach.nextRoadId}
+        ORDER BY phase_number;
+    `);
+
+    assert(
+        (movementRows as any[]).some(
+            (item) => Number(item.phaseNumber) === approach.redPhaseNumber &&
+                String(item.state).toUpperCase() === "RED",
+        ),
+        `Selected movement must be RED in phase ${approach.redPhaseNumber}`,
+    );
+
+    assert(
+        (movementRows as any[]).some(
+            (item) => Number(item.phaseNumber) === approach.greenPhaseNumber &&
+                String(item.state).toUpperCase() === "GREEN",
+        ),
+        `Selected movement must be GREEN in phase ${approach.greenPhaseNumber}`,
+    );
 
     await db.execute(sql`
         UPDATE traffic_lights
         SET
-            current_phase = 1,
+            current_phase = ${approach.redPhaseNumber},
             phase_elapsed = 0,
-            status = 'ACTIVE'
-        WHERE id =
-            ${trafficLightId};
+            cycle_duration = ${TRAFFIC_LIGHT_CYCLE_SECONDS},
+            status = 'ACTIVE',
+            updated_at = NOW()
+        WHERE id = ${approach.trafficLightId};
     `);
 
-    /*
-     * Remove existing phases.
-     */
-    await db
-        .delete(
-            schema.trafficLightPhases,
-        )
-        .where(
-            eq(
-                schema.trafficLightPhases
-                    .trafficLightId,
-                trafficLightId,
-            ),
-        );
-
-    /*
-     * Create RED and GREEN phases.
-     */
-    await db
-        .insert(
-            schema.trafficLightPhases,
-        )
-        .values([
-            {
-                trafficLightId,
-
-                phaseNumber: 1,
-
-                durationSeconds:
-                    RED_DURATION,
-
-                state: "RED",
-            },
-
-            {
-                trafficLightId,
-
-                phaseNumber: 2,
-
-                durationSeconds:
-                    GREEN_DURATION,
-
-                state: "GREEN",
-            },
-        ]);
-
-    /*
-     * Remove existing movements.
-     */
-    await db
-        .delete(
-            schema.trafficLightMovements,
-        )
-        .where(
-            eq(
-                schema.trafficLightMovements
-                    .trafficLightId,
-                trafficLightId,
-            ),
-        );
-
-    /*
-     * Configure movement for both phases.
-     */
-    await db
-        .insert(
-            schema.trafficLightMovements,
-        )
-        .values([
-            {
-                trafficLightId,
-
-                phaseNumber: 1,
-
-                fromRoadId:
-                    approach.roadId,
-
-                toRoadId:
-                    approach.nextRoadId,
-
-                state: "RED",
-            },
-
-            {
-                trafficLightId,
-
-                phaseNumber: 2,
-
-                fromRoadId:
-                    approach.roadId,
-
-                toRoadId:
-                    approach.nextRoadId,
-
-                state: "GREEN",
-            },
-        ]);
+    info(
+        `Traffic light ${approach.trafficLightId}: preserving six phases; ` +
+        `movement RED in phase ${approach.redPhaseNumber}, GREEN in phase ${approach.greenPhaseNumber}`,
+    );
 }
 
 async function getTrafficLightState(
@@ -535,6 +507,26 @@ async function getTrafficLightState(
         elapsed: Number(
             row?.elapsed,
         ),
+    };
+}
+
+async function getMovementSignalState(
+    approach: ApproachSegment,
+): Promise<{ phase: number; elapsed: number; state: string }> {
+    const light = await getTrafficLightState(approach.trafficLightId);
+    const rows = await db.execute(sql`
+        SELECT state
+        FROM traffic_light_movements
+        WHERE traffic_light_id = ${approach.trafficLightId}
+            AND phase_number = ${light.phase}
+            AND from_road_id = ${approach.roadId}
+            AND to_road_id = ${approach.nextRoadId}
+        LIMIT 1;
+    `);
+
+    return {
+        ...light,
+        state: String((rows[0] as any)?.state ?? "UNKNOWN").toUpperCase(),
     };
 }
 
@@ -830,517 +822,265 @@ async function testVehicleCreation(
 
 async function testVehicleMovement(
     simulationId: number,
-    spawnedVehicles: SpawnedVehicle[],
+    _spawnedVehicles: SpawnedVehicle[],
+    approaches: ApproachSegment[],
 ): Promise<void> {
-    console.log(
-        "\n[TEST 3] Vehicle movement",
-    );
+    console.log("\\n[TEST 3] Queue during RED, release after GREEN");
 
-    /*
-     * Vehicles are intentionally spawned close to
-     * traffic lights while the signal is RED.
-     *
-     * Therefore, we should NOT expect movement immediately.
-     *
-     * First verify that vehicles exist and are allowed
-     * to wait.
-     */
+    const queueSnapshots = new Map<number, {
+        approach: ApproachSegment;
+        vehicles: Array<{ id: number; progress: number; routeSequence: number }>;
+    }>();
 
-    const initialVehicles =
-        await getVehicles(
-            simulationId,
-        );
+    const start = Date.now();
 
-    const initialById =
-        new Map(
-            initialVehicles.map(
-                (vehicle) => [
-                    Number(
-                        vehicle.id,
-                    ),
+    // Require a production-detected queue while the selected movement is RED.
+    while (Date.now() - start < QUEUE_WAIT_TIMEOUT_MS) {
+        const congestion = await getCongestion(simulationId);
 
-                    {
-                        progress:
-                            Number(
-                                vehicle.progress,
-                            ),
+        for (const approach of approaches) {
+            const signal = await getMovementSignalState(approach);
+            if (signal.state !== "RED") continue;
 
-                        routeSequence:
-                            Number(
-                                vehicle.routeSequence,
-                            ),
-
-                        status:
-                            vehicle.status,
-                    },
-                ],
-            ),
-        );
-
-    assert(
-        initialById.size >=
-            spawnedVehicles.length,
-
-        "All spawned vehicles should be available in the simulation",
-    );
-
-    pass(
-        `${spawnedVehicles.length} vehicles are available for movement`,
-    );
-
-    /*
-     * ------------------------------------------------------------
-     * WAIT FOR THE FIRST GREEN PHASE
-     * ------------------------------------------------------------
-     *
-     * RED lasts 20 seconds.
-     *
-     * We wait until the simulation has progressed beyond
-     * the RED phase before requiring vehicle movement.
-     */
-
-    console.log(
-        "  Waiting for the traffic light to enter GREEN...",
-    );
-
-    let greenObserved =
-        false;
-
-    for (
-        let i = 0;
-        i < 12;
-        i++
-    ) {
-        await wait(
-            TICK_WAIT_MS,
-        );
-
-        const metrics =
-            await getMetrics(
-                simulationId,
+            const segment = congestion.congestion.find(
+                (item) => Number(item.segmentId) === approach.segmentId,
             );
 
-        const vehicles =
-            await getVehicles(
-                simulationId,
-            );
+            // Read vehicle state directly from PostgreSQL so this assertion
+            // does not depend on the vehicle API's response field naming.
+            const onApproach = await db.execute(sql`
+                SELECT
+                    id,
+                    progress,
+                    route_sequence AS "routeSequence",
+                    current_segment_id AS "currentSegmentId",
+                    speed_kmh AS "speedKmh",
+                    status
+                FROM vehicles
+                WHERE simulation_run_id = ${simulationId}
+                    AND current_segment_id = ${approach.segmentId}
+                ORDER BY progress DESC;
+            `) as any[];
 
-        const hasMovingVehicle =
-            vehicles.some(
-                (vehicle) =>
-                    Number(
-                        vehicle.speedKmh,
-                    ) > 0 &&
-                    vehicle.status !==
-                        "WAITING_AT_SIGNAL",
-            );
+            if (Number(segment?.queueVehicleCount ?? 0) >= 2 && onApproach.length >= 2) {
+                queueSnapshots.set(approach.trafficLightId, {
+                    approach,
+                    vehicles: onApproach.map((vehicle) => ({
+                        id: Number(vehicle.id),
+                        progress: Number(vehicle.progress ?? 0),
+                        routeSequence: Number(vehicle.routeSequence ?? 0),
+                    })),
+                });
 
-        /*
-         * We consider movement valid if a vehicle
-         * is actually moving.
-         */
-        if (
-            hasMovingVehicle
-        ) {
-            greenObserved =
-                true;
-
-            break;
+                pass(
+                    `Traffic light ${approach.trafficLightId}: production queue ` +
+                    `of ${segment?.queueVehicleCount} observed during RED phase ${signal.phase}`,
+                );
+            }
         }
 
-        /*
-         * Also inspect simulation time so we
-         * know the RED phase has been crossed.
-         */
-        if (
-            metrics.simulation
-                .simulationTime >=
-            RED_DURATION
-        ) {
-            greenObserved =
-                true;
-
-            break;
-        }
+        if (queueSnapshots.size > 0) break;
+        await wait(TICK_WAIT_MS);
     }
 
     assert(
-        greenObserved,
-
-        "Simulation should reach the GREEN phase",
+        queueSnapshots.size > 0,
+        `No production-detected queue formed during RED within ${QUEUE_WAIT_TIMEOUT_MS / 1000}s`,
     );
 
-    pass(
-        "Traffic light reached the movement phase",
-    );
+    let releasedVehicleDetected = false;
 
-    /*
-     * ------------------------------------------------------------
-     * CAPTURE STATE BEFORE MOVEMENT
-     * ------------------------------------------------------------
-     */
+    for (const snapshot of queueSnapshots.values()) {
+        const { approach, vehicles: queuedVehicles } = snapshot;
+        const greenStart = Date.now();
 
-    const beforeMovement =
-        await getVehicles(
-            simulationId,
+        console.log(
+            `  Waiting for movement at traffic light ${approach.trafficLightId} ` +
+            `to turn GREEN (expected phase ${approach.greenPhaseNumber})...`,
         );
 
-    const beforeById =
-        new Map(
-            beforeMovement.map(
-                (vehicle) => [
-                    Number(
-                        vehicle.id,
-                    ),
+        let greenSeen = false;
+        while (Date.now() - greenStart < GREEN_WAIT_TIMEOUT_MS) {
+            const signal = await getMovementSignalState(approach);
+            if (signal.state === "GREEN") {
+                greenSeen = true;
+                pass(`Traffic light ${approach.trafficLightId}: movement GREEN in phase ${signal.phase}`);
+                break;
+            }
+            await wait(TICK_WAIT_MS);
+        }
 
-                    {
-                        progress:
-                            Number(
-                                vehicle.progress,
-                            ),
-
-                        routeSequence:
-                            Number(
-                                vehicle.routeSequence,
-                            ),
-
-                        speed:
-                            Number(
-                                vehicle.speedKmh,
-                            ),
-
-                        status:
-                            vehicle.status,
-                    },
-                ],
-            ),
+        assert(
+            greenSeen,
+            `Movement at traffic light ${approach.trafficLightId} never turned GREEN within ${GREEN_WAIT_TIMEOUT_MS / 1000}s`,
         );
 
-    /*
-     * ------------------------------------------------------------
-     * ALLOW VEHICLES TO MOVE
-     * ------------------------------------------------------------
-     */
+        const movementStart = Date.now();
+        while (Date.now() - movementStart < 30_000) {
+            const vehicleRows = await db.execute(sql`
+                SELECT
+                    id,
+                    progress,
+                    route_sequence AS "routeSequence",
+                    current_segment_id AS "currentSegmentId",
+                    speed_kmh AS "speedKmh",
+                    status
+                FROM vehicles
+                WHERE simulation_run_id = ${simulationId};
+            `) as any[];
 
-    console.log(
-        "  GREEN phase reached. Waiting for vehicle movement...",
-    );
-
-    await wait(
-        10_000,
-    );
-
-    /*
-     * ------------------------------------------------------------
-     * CAPTURE STATE AFTER MOVEMENT
-     * ------------------------------------------------------------
-     */
-
-    const afterMovement =
-        await getVehicles(
-            simulationId,
-        );
-
-    let movementDetected =
-        false;
-
-    let routeProgressionDetected =
-        false;
-
-    let movingVehicleDetected =
-        false;
-
-    for (
-        const vehicle of
-        spawnedVehicles
-    ) {
-        const before =
-            beforeById.get(
-                vehicle.id,
+            const byId = new Map(
+                vehicleRows.map((vehicle) => [Number(vehicle.id), vehicle]),
             );
 
-        const after =
-            afterMovement.find(
-                (item) =>
-                    Number(
-                        item.id,
-                    ) ===
-                    vehicle.id,
-            );
+            for (const queued of queuedVehicles) {
+                const current = byId.get(queued.id);
 
-        /*
-         * A vehicle may have completed its route
-         * and therefore no longer appear in the
-         * active vehicle response.
-         *
-         * That is also valid movement.
-         */
-        if (
-            !after
-        ) {
-            movementDetected =
-                true;
+                // A missing row or COMPLETED status means the vehicle finished.
+                if (!current || String(current.status ?? "").toUpperCase() === "COMPLETED") {
+                    releasedVehicleDetected = true;
+                    break;
+                }
 
-            continue;
+                const progress = Number(current.progress ?? 0);
+                const routeSequence = Number(current.routeSequence ?? 0);
+                const currentSegmentId = Number(current.currentSegmentId ?? 0);
+                const speed = Number(current.speedKmh ?? 0);
+                const status = String(current.status ?? "").toUpperCase();
+
+                if (
+                    Math.abs(progress - queued.progress) > 0.001 ||
+                    routeSequence > queued.routeSequence ||
+                    currentSegmentId !== approach.segmentId ||
+                    (speed > 0 && status !== "WAITING_AT_SIGNAL")
+                ) {
+                    releasedVehicleDetected = true;
+                    break;
+                }
+            }
+
+            if (releasedVehicleDetected) break;
+            await wait(TICK_WAIT_MS);
         }
 
-        const afterProgress =
-            Number(
-                after.progress,
-            );
-
-        const afterRouteSequence =
-            Number(
-                after.routeSequence,
-            );
-
-        const afterSpeed =
-            Number(
-                after.speedKmh,
-            );
-
-        if (
-            afterSpeed > 0 &&
-            after.status !==
-                "WAITING_AT_SIGNAL"
-        ) {
-            movingVehicleDetected =
-                true;
-        }
-
-        if (
-            before &&
-            Math.abs(
-                afterProgress -
-                    before.progress,
-            ) > 0.001
-        ) {
-            movementDetected =
-                true;
-        }
-
-        if (
-            before &&
-            afterRouteSequence >
-                before.routeSequence
-        ) {
-            routeProgressionDetected =
-                true;
-        }
+        if (releasedVehicleDetected) break;
     }
-
-    /*
-     * At least one of these should happen:
-     *
-     * 1. Vehicle physically moves.
-     * 2. Vehicle advances to another route segment.
-     * 3. Vehicle completes its route and disappears.
-     */
 
     assert(
-        movementDetected ||
-            routeProgressionDetected ||
-            movingVehicleDetected,
-
-        "At least one vehicle should move after the traffic light becomes GREEN",
+        releasedVehicleDetected,
+        "None of the vehicles observed in the RED queue moved, advanced its route, or completed after GREEN",
     );
 
-    pass(
-        "Vehicle movement detected after GREEN phase",
-    );
-
-    if (
-        routeProgressionDetected
-    ) {
-        pass(
-            "At least one vehicle progressed to a later route segment",
-        );
-    }
-
-    if (
-        movingVehicleDetected
-    ) {
-        pass(
-            "At least one vehicle is actively moving",
-        );
-    }
-
-    if (
-        movementDetected
-    ) {
-        pass(
-            "Vehicle position/progress changed",
-        );
-    }
+    pass("At least one queued vehicle moved or progressed after GREEN");
 }
 
-
-/* ========================================================================
-   TEST 4 — TRAFFIC LIGHTS
-   ======================================================================== */
 
 async function testTrafficLight(
     approaches: ApproachSegment[],
 ): Promise<void> {
-    console.log(
-        "\n[TEST 4] Traffic-light phases and movements",
-    );
+    console.log("\\n[TEST 4] Six traffic-light phases and movement states");
 
-    for (
-        const approach of
-        approaches
-    ) {
-        const state =
-            await getTrafficLightState(
-                approach.trafficLightId,
-            );
+    for (const approach of approaches) {
+        const phases = await db.execute(sql`
+            SELECT phase_number AS "phaseNumber",
+                duration_seconds AS "durationSeconds", state
+            FROM traffic_light_phases
+            WHERE traffic_light_id = ${approach.trafficLightId}
+            ORDER BY phase_number;
+        `);
 
         assert(
-            state.phase === 1,
+            phases.length === 6,
+            `Traffic light ${approach.trafficLightId} should have six phases; found ${phases.length}`,
+        );
 
-            `Traffic light ${approach.trafficLightId} should start in RED phase`,
+        const normalized = (phases as any[]).map((phase) => ({
+            phaseNumber: Number(phase.phaseNumber),
+            durationSeconds: Number(phase.durationSeconds),
+            state: String(phase.state).toUpperCase(),
+        }));
+
+        assert(
+            normalized.every(
+                (phase, index) =>
+                    phase.phaseNumber === index + 1 &&
+                    phase.durationSeconds === PHASE_DURATIONS[index],
+            ),
+            `Traffic light ${approach.trafficLightId} has an invalid phase sequence`,
         );
 
         pass(
-            `Traffic light ${approach.trafficLightId}: RED phase active`,
+            `Traffic light ${approach.trafficLightId}: six phases, 66-second cycle, ` +
+            `durations ${normalized.map((phase) => phase.durationSeconds).join("/")}`,
         );
 
-        const phases =
-            await db.execute(sql`
-                SELECT
-                    phase_number AS "phaseNumber",
-                    duration_seconds AS "durationSeconds",
-                    state
-                FROM traffic_light_phases
-                WHERE traffic_light_id =
-                    ${approach.trafficLightId}
-                ORDER BY phase_number;
-            `);
+        const movements = await db.execute(sql`
+            SELECT phase_number AS "phaseNumber", state
+            FROM traffic_light_movements
+            WHERE traffic_light_id = ${approach.trafficLightId}
+                AND from_road_id = ${approach.roadId}
+                AND to_road_id = ${approach.nextRoadId}
+            ORDER BY phase_number;
+        `);
 
         assert(
-            phases.length === 2,
-
-            `Traffic light ${approach.trafficLightId} should have two phases`,
-        );
-
-        const redPhase =
-            phases.find(
-                (phase: any) =>
-                    Number(
-                        phase.phaseNumber,
-                    ) === 1,
-            ) as any;
-
-        const greenPhase =
-            phases.find(
-                (phase: any) =>
-                    Number(
-                        phase.phaseNumber,
-                    ) === 2,
-            ) as any;
-
-        assert(
-            redPhase?.state ===
-                "RED",
-
-            "Phase 1 should be RED",
+            (movements as any[]).some(
+                (item) => Number(item.phaseNumber) === approach.redPhaseNumber &&
+                    String(item.state).toUpperCase() === "RED",
+            ),
+            `Approach movement should be RED in phase ${approach.redPhaseNumber}`,
         );
 
         assert(
-            greenPhase?.state ===
-                "GREEN",
-
-            "Phase 2 should be GREEN",
+            (movements as any[]).some(
+                (item) => Number(item.phaseNumber) === approach.greenPhaseNumber &&
+                    String(item.state).toUpperCase() === "GREEN",
+            ),
+            `Approach movement should be GREEN in phase ${approach.greenPhaseNumber}`,
         );
 
-        pass(
-            `Traffic light ${approach.trafficLightId}: RED/GREEN phases configured`,
-        );
-
-        const movements =
-            await db.execute(sql`
-                SELECT
-                    phase_number AS "phaseNumber",
-                    from_road_id AS "fromRoadId",
-                    to_road_id AS "toRoadId",
-                    state
-                FROM traffic_light_movements
-                WHERE traffic_light_id =
-                    ${approach.trafficLightId}
-                ORDER BY phase_number;
-            `);
-
-        assert(
-            movements.length >= 2,
-
-            `Traffic light ${approach.trafficLightId} should have traffic movements`,
-        );
-
-        pass(
-            `Traffic light ${approach.trafficLightId}: movements configured`,
-        );
+        pass(`Traffic light ${approach.trafficLightId}: tested movement has RED and GREEN states`);
     }
 }
 
 
-/* ========================================================================
-   TEST 5 — QUEUE FORMATION
-   ======================================================================== */
-
 async function testQueueFormation(
     simulationId: number,
 ): Promise<void> {
-    console.log(
-        "\n[TEST 5] Queue formation",
+    console.log("\\n[TEST 5] Queue formation");
+
+    const [congestion, eventData] = await Promise.all([
+        getCongestion(simulationId),
+        getEvents(simulationId),
+    ]);
+
+    const queuedSegments = congestion.congestion.filter(
+        (segment) => segment.queueVehicleCount >= 2,
     );
 
-    const congestion =
-        await getCongestion(
-            simulationId,
-        );
-
-    const queuedSegments =
-        congestion.congestion.filter(
-            (segment) =>
-                segment.queueVehicleCount >=
-                2,
-        );
+    const queueEventObserved = eventData.events.some(
+        (event) => event.type === "TRAFFIC_QUEUE_STARTED",
+    );
 
     assert(
-        queuedSegments.length > 0,
-
-        "At least one traffic queue should form",
+        queuedSegments.length > 0 || queueEventObserved,
+        "A production queue or TRAFFIC_QUEUE_STARTED event should confirm queue formation",
     );
 
-    const largestQueue =
-        Math.max(
-            ...queuedSegments.map(
-                (segment) =>
-                    segment.queueVehicleCount,
-            ),
+    if (queuedSegments.length > 0) {
+        const largestQueue = Math.max(
+            ...queuedSegments.map((segment) => segment.queueVehicleCount),
         );
-
-    pass(
-        `Queue detected with ${largestQueue} vehicles`,
-    );
-
-    const queueLength =
-        Math.max(
-            ...queuedSegments.map(
-                (segment) =>
-                    segment.queueLengthMeters,
-            ),
+        const queueLength = Math.max(
+            ...queuedSegments.map((segment) => segment.queueLengthMeters),
         );
-
-    info(
-        `Maximum detected queue length: ${queueLength}m`,
-    );
+        pass(`Queue detected with ${largestQueue} vehicles`);
+        info(`Maximum detected queue length: ${queueLength}m`);
+    } else {
+        pass("Queue formation confirmed by TRAFFIC_QUEUE_STARTED event");
+    }
 }
 
-
-/* ========================================================================
-   TEST 6 — LIVE METRICS
-   ======================================================================== */
 
 async function testLiveMetrics(
     simulationId: number,
@@ -1726,7 +1466,7 @@ async function runLongSimulationMonitor(
     );
 
     console.log(
-        `Traffic light cycle: RED ${RED_DURATION}s → GREEN ${GREEN_DURATION}s`,
+        `Traffic-light cycle: six phases, ${TRAFFIC_LIGHT_CYCLE_SECONDS}s total`,
     );
 
     const startTime =
@@ -1800,27 +1540,20 @@ async function runLongSimulationMonitor(
         /*
          * Read every configured traffic light.
          */
-        const lightStates =
+        const movementStates =
             await Promise.all(
-                approaches.map(
-                    (approach) =>
-                        getTrafficLightState(
-                            approach.trafficLightId,
-                        ),
+                approaches.map((approach) =>
+                    getMovementSignalState(approach),
                 ),
             );
 
-        const redCount =
-            lightStates.filter(
-                (state) =>
-                    state.phase === 1,
-            ).length;
+        const redCount = movementStates.filter(
+            (state) => state.state === "RED",
+        ).length;
 
-        const greenCount =
-            lightStates.filter(
-                (state) =>
-                    state.phase === 2,
-            ).length;
+        const greenCount = movementStates.filter(
+            (state) => state.state === "GREEN",
+        ).length;
 
         if (
             redCount > 0
@@ -1961,7 +1694,7 @@ async function runLongSimulationMonitor(
             );
 
             console.log(
-                `Traffic Lights: ${redCount} RED | ${greenCount} GREEN`,
+                `Tested Movements: ${redCount} RED | ${greenCount} GREEN`,
             );
 
             console.log(
@@ -2545,19 +2278,20 @@ async function testPhase3(): Promise<void> {
         );
 
         /* ================================================================
-           VEHICLE MOVEMENT
+           TRAFFIC LIGHT VALIDATION
+        ================================================================ */
+
+        await testTrafficLight(
+            approaches,
+        );
+
+        /* ================================================================
+           QUEUE DURING RED, RELEASE AFTER GREEN
         ================================================================ */
 
         await testVehicleMovement(
             simulationId,
             allSpawnedVehicles,
-        );
-
-        /* ================================================================
-           TRAFFIC LIGHT VALIDATION
-        ================================================================ */
-
-        await testTrafficLight(
             approaches,
         );
 

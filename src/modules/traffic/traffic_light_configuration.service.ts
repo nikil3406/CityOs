@@ -5,6 +5,7 @@ import { db } from "@/db";
 import {
     trafficLights,
     trafficLightMovements,
+    trafficLightPhases,
 } from "@/db/schema";
 
 import {
@@ -21,6 +22,8 @@ import {
     type TrafficLightPhaseNumber,
     type TrafficLightMovementState,
 } from "./traffic_light_strategy";
+
+
 
 export type TrafficLightMovementConfiguration = {
     incomingSegmentId: number;
@@ -49,10 +52,22 @@ export type TrafficLightMovementConfiguration = {
     }[];
 };
 
+const TRAFFIC_LIGHT_PHASES = [
+    { phaseNumber: 1, durationSeconds: 20, state: "GREEN" },
+    { phaseNumber: 2, durationSeconds: 3, state: "YELLOW" },
+    { phaseNumber: 3, durationSeconds: 20, state: "GREEN" },
+    { phaseNumber: 4, durationSeconds: 3, state: "YELLOW" },
+    { phaseNumber: 5, durationSeconds: 10, state: "GREEN" },
+    { phaseNumber: 6, durationSeconds: 10, state: "GREEN" },
+] as const;
+
+const TRAFFIC_LIGHT_CYCLE_DURATION = 66;
+
 export async function generateTrafficLightConfiguration(
     cityId: number,
     intersectionId: number,
 ): Promise<TrafficLightMovementConfiguration[]> {
+    
     const topology =
         await getIntersectionTopology(
             cityId,
@@ -152,54 +167,76 @@ export async function configureTrafficLight(
             light.intersectionId,
         );
 
-    await db.transaction(
-        async (tx) => {
-            await tx
-                .delete(
-                    trafficLightMovements,
-                )
-                .where(
-                    eq(
-                        trafficLightMovements.trafficLightId,
-                        trafficLightId,
-                    ),
-                );
+    
+    await db.transaction(async (tx) => {
+        // 1. Remove existing movement-state records.
+        await tx
+            .delete(trafficLightMovements)
+            .where(
+                eq(
+                    trafficLightMovements.trafficLightId,
+                    trafficLightId,
+                ),
+            );
 
-            const rows =
-                configuration.flatMap(
-                    (movement) =>
-                        movement.states.map(
-                            (state) => ({
-                                trafficLightId,
+        // 2. Remove existing phase records.
+        await tx
+            .delete(trafficLightPhases)
+            .where(
+                eq(
+                    trafficLightPhases.trafficLightId,
+                    trafficLightId,
+                ),
+            );
 
-                                phaseNumber:
-                                    state.phase,
+        // 3. Insert the six phases.
+        await tx
+            .insert(trafficLightPhases)
+            .values(
+                TRAFFIC_LIGHT_PHASES.map((phase) => ({
+                    trafficLightId,
+                    phaseNumber: phase.phaseNumber,
+                    durationSeconds: phase.durationSeconds,
+                    state: phase.state,
+                })),
+            );
 
-                                fromRoadId:
-                                    movement.incomingRoadId,
+        // 4. Generate all movement states across six phases.
+        const rows = configuration.flatMap((movement) =>
+            movement.states.map((state) => ({
+                trafficLightId,
+                phaseNumber: state.phase,
+                fromRoadId: movement.incomingRoadId,
+                toRoadId: movement.outgoingRoadId,
+                state: state.state,
+            })),
+        );
 
-                                toRoadId:
-                                    movement.outgoingRoadId,
+        if (rows.length === 0) {
+            throw new Error(
+                `No movements generated for traffic light ${trafficLightId}`,
+            );
+        }
 
-                                state:
-                                    state.state,
-                            }),
-                        ),
-                );
+        // 5. Insert the movement states.
+        await tx
+            .insert(trafficLightMovements)
+            .values(rows);
 
-            if (rows.length === 0) {
-                throw new Error(
-                    `No movements generated for traffic light ${trafficLightId}`,
-                );
-            }
+        // 6. Synchronize the cycle duration and reset the phase timer.
+        await tx
+            .update(trafficLights)
+            .set({
+                cycleDuration: TRAFFIC_LIGHT_CYCLE_DURATION,
+                currentPhase: 1,
+                phaseElapsed: 0,
+                updatedAt: new Date(),
+            })
+            .where(
+                eq(trafficLights.id, trafficLightId),
+            );
+    });
 
-            await tx
-                .insert(
-                    trafficLightMovements,
-                )
-                .values(rows);
-        },
-    );
 
     return {
         trafficLightId,
