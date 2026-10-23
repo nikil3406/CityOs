@@ -16,159 +16,81 @@ type SimulationMetrics = {
     totalDistanceMeters: number;
 };
 
-export function useSimulationMetrics(
-    simulationId: number | null,
-) {
-    const [metrics, setMetrics] =
-        useState<SimulationMetrics | null>(null);
+type Snapshot = {
+    simulationId: number;
+    metrics: SimulationMetrics;
+    status: string;
+    simulationTime: number;
+    error: string | null;
+};
 
-    const [loading, setLoading] =
-        useState(false);
-
-    const [error, setError] =
-        useState<string | null>(null);
-
-    const [simulationStatus, setSimulationStatus] =
-        useState<string | null>(null);
-
-    const [simulationTime, setSimulationTime] =
-        useState<number | null>(null);
+export function useSimulationMetrics(simulationId: number | null) {
+    const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+    const [loading, setLoading] = useState(false);
 
     useEffect(() => {
-        if (simulationId === null) {
-            setMetrics(null);
-            return;
-        }
+        if (simulationId === null) return;
 
         let cancelled = false;
-        let interval: NodeJS.Timeout | null = null;
-
-        const stopPolling = () => {
-            if (interval) {
-                clearInterval(interval);
-                interval = null;
-
-                console.log(
-                    `Simulation ${simulationId}: metrics polling stopped.`,
-                );
-            }
-        };
-
         const fetchMetrics = async () => {
+            setLoading(true);
             try {
-                /*
-                 * First check whether the simulation
-                 * is still running.
-                 */
-                const simulationResponse =
-                    await fetch(
-                        `/api/simulation/runs/${simulationId}`,
-                        {
-                            cache: "no-store",
-                        },
-                    );
-
-                if (!simulationResponse.ok) {
-                    throw new Error(
-                        "Failed to fetch simulation status",
-                    );
-                }
-
-                const simulation =
-                    await simulationResponse.json();
-
-                if (cancelled) {
-                    return;
-                }
-
-                setSimulationStatus(simulation.status);
-                setSimulationTime(simulation.simulationTime);
-
-                /*
-                 * Simulation has stopped.
-                 *
-                 * Keep the last metrics visible,
-                 * but stop making further requests.
-                 */
-                if (simulation.status !== "RUNNING") {
-                    stopPolling();
-                    return;
-                }
-
-                setLoading(true);
-
-                const response =
-                    await fetch(
-                        `/api/simulation/runs/${simulationId}/metrics`,
-                        {
-                            cache: "no-store",
-                        },
-                    );
-
-                if (!response.ok) {
-                    throw new Error(
-                        "Failed to fetch simulation metrics",
-                    );
-                }
-
-                const data =
-                    await response.json();
-
-                if (cancelled) {
-                    return;
-                }
-
-                setMetrics(data.metrics);
-                setError(null);
-            } catch (error) {
-                if (cancelled) {
-                    return;
-                }
-
-                console.error(
-                    "Failed to fetch simulation metrics:",
-                    error,
+                const response = await fetch(
+                    `/api/simulation/runs/${simulationId}/metrics`,
+                    { cache: "no-store" },
                 );
-
-                setError(
-                    "Failed to fetch simulation metrics",
-                );
-            } finally {
+                if (!response.ok) throw new Error("Failed to fetch simulation metrics");
+                const data = await response.json();
                 if (!cancelled) {
-                    setLoading(false);
+                    setSnapshot({
+                        simulationId,
+                        metrics: data.metrics,
+                        status: data.simulation.status,
+                        simulationTime: data.simulation.simulationTime,
+                        error: null,
+                    });
                 }
+            } catch (error) {
+                if (!cancelled) {
+                    setSnapshot((current) => ({
+                        simulationId,
+                        metrics: current?.simulationId === simulationId ? current.metrics : {
+                            totalVehicles: 0,
+                            activeVehicles: 0,
+                            completedVehicles: 0,
+                            waitingVehicles: 0,
+                            signalWaitingVehicles: 0,
+                            averageSpeedKmh: 0,
+                            averageTravelTimeSeconds: 0,
+                            activeQueues: 0,
+                            maximumQueueVehicles: 0,
+                            averageQueueLengthMeters: 0,
+                            totalDistanceMeters: 0,
+                        },
+                        status: current?.simulationId === simulationId ? current.status : "UNKNOWN",
+                        simulationTime: current?.simulationId === simulationId ? current.simulationTime : 0,
+                        error: error instanceof Error ? error.message : "Failed to fetch simulation metrics",
+                    }));
+                }
+            } finally {
+                if (!cancelled) setLoading(false);
             }
         };
 
-        /*
-         * Fetch immediately.
-         */
-        fetchMetrics();
-
-        /*
-         * Continue while simulation is RUNNING.
-         * fetchMetrics() will remove this interval
-         * once the simulation stops.
-         */
-        interval = setInterval(
-            fetchMetrics,
-            1000,
-        );
-
+        void fetchMetrics();
+        const interval = setInterval(() => void fetchMetrics(), 1000);
         return () => {
             cancelled = true;
-
-            if (interval) {
-                clearInterval(interval);
-            }
+            clearInterval(interval);
         };
     }, [simulationId]);
 
+    const current = snapshot?.simulationId === simulationId ? snapshot : null;
     return {
-        metrics,
+        metrics: current?.metrics ?? null,
         loading,
-        error,
-        simulationStatus,
-        simulationTime,
+        error: current?.error ?? null,
+        simulationStatus: current?.status ?? null,
+        simulationTime: current?.simulationTime ?? null,
     };
 }

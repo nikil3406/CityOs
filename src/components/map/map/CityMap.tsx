@@ -6,6 +6,8 @@ import {
     MapContainer,
     Polygon,
     TileLayer,
+    Polyline,
+    CircleMarker,
 } from "react-leaflet";
 
 import "leaflet/dist/leaflet.css";
@@ -57,6 +59,12 @@ type CityMapProps = {
     boundary: [number, number][][];
     loading: boolean;
     error: string | null;
+    routeIntersectionIds?: number[];
+    sourceIntersectionId?: number | null;
+    destinationIntersectionId?: number | null;
+    onIntersectionSelect?: (id: number) => void;
+    signalIndicators?: { intersectionId: number; state: string }[];
+    routeCoordinates?: [number, number][];
 };
 
 export default function CityMap({
@@ -75,6 +83,12 @@ export default function CityMap({
     boundary,
     loading,
     error,
+    routeIntersectionIds = [],
+    sourceIntersectionId = null,
+    destinationIntersectionId = null,
+    onIntersectionSelect,
+    signalIndicators = [],
+    routeCoordinates = [],
 }: CityMapProps) {
 
     /*
@@ -144,6 +158,7 @@ export default function CityMap({
     const toggleIntersectionSelection = (
         id: number,
     ) => {
+        onIntersectionSelect?.(id);
         setSelectedIntersectionId(
             (currentId) =>
                 currentId === id
@@ -572,6 +587,28 @@ export default function CityMap({
                             />
                         ),
                     )}
+
+                {(routeCoordinates.length > 1 || routeIntersectionIds.length > 1) && (
+                    <Polyline interactive={false} positions={routeCoordinates.length > 1 ? routeCoordinates.map(([longitude, latitude]) => [latitude, longitude] as [number, number]) : routeIntersectionIds.flatMap((id) => {
+                        const intersection = intersections.find((item) => item.id === id);
+                        return intersection ? [[intersection.location[1], intersection.location[0]] as [number, number]] : [];
+                    })} pathOptions={{ color: "#f97316", weight: 6, opacity: 0.9, dashArray: "10 8" }} />
+                )}
+                {signalIndicators.map((signal) => {
+                    const intersection = intersections.find((item) => item.id === signal.intersectionId);
+                    if (!intersection) return null;
+                    const normalizedState = signal.state.toUpperCase();
+                    const color = normalizedState.includes("GREEN") ? "#16a34a" : normalizedState.includes("YELLOW") ? "#eab308" : normalizedState.includes("RED") ? "#dc2626" : "#64748b";
+                    return <CircleMarker interactive={false} key={`signal-${signal.intersectionId}`} center={[intersection.location[1], intersection.location[0]]}
+                        radius={7} pathOptions={{ color: "white", weight: 2, fillColor: color, fillOpacity: 1 }} />;
+                })}
+                {[sourceIntersectionId, destinationIntersectionId].map((id, index) => {
+                    if (id === null) return null;
+                    const intersection = intersections.find((item) => item.id === id);
+                    if (!intersection) return null;
+                    return <CircleMarker interactive={false} key={`${index}-${id}`} center={[intersection.location[1], intersection.location[0]]}
+                        radius={10} pathOptions={{ color: "white", weight: 3, fillColor: index === 0 ? "#16a34a" : "#dc2626", fillOpacity: 1 }} />;
+                })}
 
                 {/*
                  * Simulation vehicles

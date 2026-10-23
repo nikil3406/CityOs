@@ -42,6 +42,12 @@ type CityMapClientProps = {
     boundary: [number, number][][];
     loading: boolean;
     error: string | null;
+    routeIntersectionIds?: number[];
+    sourceIntersectionId?: number | null;
+    destinationIntersectionId?: number | null;
+    onIntersectionSelect?: (id: number) => void;
+    signalIndicators?: { intersectionId: number; state: string }[];
+    routeCoordinates?: [number, number][];
 };
 
 export default function CityMapClient({
@@ -60,6 +66,12 @@ export default function CityMapClient({
     boundary,
     loading,
     error,
+    routeIntersectionIds = [],
+    sourceIntersectionId = null,
+    destinationIntersectionId = null,
+    onIntersectionSelect,
+    signalIndicators = [],
+    routeCoordinates = [],
 }: CityMapClientProps) {
     return (
         <CityMap
@@ -80,6 +92,12 @@ export default function CityMapClient({
             boundary={boundary}
             loading={loading}
             error={error}
+            routeIntersectionIds={routeIntersectionIds}
+            sourceIntersectionId={sourceIntersectionId}
+            destinationIntersectionId={destinationIntersectionId}
+            onIntersectionSelect={onIntersectionSelect}
+            signalIndicators={signalIndicators}
+            routeCoordinates={routeCoordinates}
         />
     );
 }

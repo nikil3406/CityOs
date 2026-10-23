@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { eq, and, ne } from "drizzle-orm";
+import { eq, and, ne, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import {
@@ -11,6 +11,7 @@ import { generateVehicles } from "@/modules/vehicle/vehicle.service";
 import { initializeSimulationVehicleStates } from "@/modules/vehicle/vehicle_state.service";
 import { clearSimulationVehicleCache } from "@/modules/vehicle/vehicle_simulation_cache.service";
 import { simulationEngine } from "@/modules/simulation/simulation.engine";
+import { findShortestRoute } from "@/modules/road/routing.service";
 
 type RouteContext = {
     params: Promise<{ id: string }>;
@@ -36,6 +37,8 @@ export async function POST(
 
         const body = (await request.json()) as {
             count?: number;
+            sourceIntersectionId?: number;
+            destinationIntersectionId?: number;
         };
 
         const count = body.count ?? 10;
@@ -73,10 +76,32 @@ export async function POST(
             );
         }
 
+        const hasSource = body.sourceIntersectionId !== undefined;
+        const hasDestination = body.destinationIntersectionId !== undefined;
+        if (hasSource !== hasDestination || (hasSource && (
+            !Number.isInteger(body.sourceIntersectionId) || body.sourceIntersectionId! <= 0 ||
+            !Number.isInteger(body.destinationIntersectionId) || body.destinationIntersectionId! <= 0 ||
+            body.sourceIntersectionId === body.destinationIntersectionId
+        ))) {
+            return NextResponse.json({ error: "Provide two different valid source and destination intersection IDs" }, { status: 400 });
+        }
+        if (hasSource) {
+            const [run] = await db.select({ cityId: simulationRuns.cityId }).from(simulationRuns)
+                .where(eq(simulationRuns.id, simulationId)).limit(1);
+            const route = await findShortestRoute(run.cityId, body.sourceIntersectionId!, body.destinationIntersectionId!);
+            if (!route || route.segments.length === 0) {
+                return NextResponse.json({ error: "No drivable route exists between these intersections" }, { status: 422 });
+            }
+        }
+
         const generated =
             await generateVehicles(
                 simulationId,
                 count,
+                hasSource ? {
+                    sourceIntersectionId: body.sourceIntersectionId!,
+                    destinationIntersectionId: body.destinationIntersectionId!,
+                } : undefined,
             );
 
         if (simulationEngine.isRunning(simulationId)) {
@@ -100,8 +125,9 @@ export async function POST(
 
         return NextResponse.json(
             {
-                error:
-                    "Failed to generate vehicles",
+                error: error instanceof Error
+                    ? error.message
+                    : "Failed to generate vehicles",
             },
             { status: 500 },
         );
@@ -140,7 +166,8 @@ export async function GET(
                 speedKmh: vehicles.speedKmh,
                 status: vehicles.status,
                 progress: vehicles.progress,
-                position: vehicles.position,
+                longitude: sql<number>`ST_X(${vehicles.position})`,
+                latitude: sql<number>`ST_Y(${vehicles.position})`,
             })
             .from(vehicles)
             .where(
@@ -156,7 +183,10 @@ export async function GET(
                 ),
             );
 
-        return NextResponse.json(result);
+        return NextResponse.json(result.map(({ longitude, latitude, ...vehicle }) => ({
+            ...vehicle,
+            position: [Number(longitude), Number(latitude)],
+        })));
     } catch (error) {
         console.error(
             "GET /api/simulation/runs/[id]/vehicles error:",

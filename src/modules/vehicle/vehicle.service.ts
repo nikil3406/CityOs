@@ -48,6 +48,7 @@ type VehiclePlan = {
 export async function generateVehicles(
     simulationRunId: number,
     count: number,
+    endpoints?: { sourceIntersectionId: number; destinationIntersectionId: number },
 ): Promise<GeneratedVehicle[]> {
     if (!Number.isInteger(count) || count <= 0) {
         throw new Error("Vehicle count must be a positive integer");
@@ -67,6 +68,11 @@ export async function generateVehicles(
     const cityId = Number(
         (simulationResult[0] as { cityId: number | string }).cityId,
     );
+
+    if (endpoints && (endpoints.sourceIntersectionId === endpoints.destinationIntersectionId ||
+        !Number.isInteger(endpoints.sourceIntersectionId) || !Number.isInteger(endpoints.destinationIntersectionId))) {
+        throw new Error("Source and destination must be different valid intersections");
+    }
 
     const segmentResult = await db.execute(sql`
         SELECT
@@ -94,7 +100,21 @@ export async function generateVehicles(
             startIntersectionId: Number(segment.startIntersectionId),
             endIntersectionId: Number(segment.endIntersectionId),
         }),
-    );
+    ).filter((segment) => !endpoints ||
+        segment.startIntersectionId === endpoints.sourceIntersectionId ||
+        segment.endIntersectionId === endpoints.sourceIntersectionId);
+
+    // Manual mode creates the requested fleet on one selected route. Reuse
+    // source-connected candidates so vehicle count is not capped by the source
+    // intersection's number of adjacent road segments.
+    if (endpoints && candidates.length > 0) {
+        const sourceCandidates = [...candidates];
+        while (candidates.length < count) {
+            candidates.push(
+                sourceCandidates[candidates.length % sourceCandidates.length],
+            );
+        }
+    }
 
     if (candidates.length === 0) {
         throw new Error("No usable road segments are available for this city");
@@ -107,7 +127,7 @@ export async function generateVehicles(
     for (const candidate of candidates) {
         if (plans.length >= count) break;
 
-        const startIntersectionId = candidate.startIntersectionId;
+        const startIntersectionId = endpoints?.sourceIntersectionId ?? candidate.startIntersectionId;
         let reachable = reachableByStart.get(startIntersectionId);
 
         if (!reachable) {
@@ -118,7 +138,7 @@ export async function generateVehicles(
             reachableByStart.set(startIntersectionId, reachable);
         }
 
-        const destinations = reachable.filter(
+        const destinations = (endpoints ? [endpoints.destinationIntersectionId] : reachable).filter(
             (intersectionId) => intersectionId !== startIntersectionId,
         );
         if (destinations.length === 0) continue;

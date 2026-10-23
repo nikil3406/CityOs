@@ -21,72 +21,23 @@ type SimulationEventsProps = {
 export default function SimulationEvents({
     simulationId,
 }: SimulationEventsProps) {
-    const [events, setEvents] =
-        useState<SimulationEvent[]>([]);
+    const [snapshot, setSnapshot] = useState<{
+        simulationId: number;
+        events: SimulationEvent[];
+        error: string | null;
+    } | null>(null);
 
     const [loading, setLoading] =
         useState(false);
 
-    const [error, setError] =
-        useState<string | null>(null);
-
     useEffect(() => {
-    if (simulationId === null) {
-        setEvents([]);
-        return;
-    }
+    if (simulationId === null) return;
 
     let cancelled = false;
     let interval: NodeJS.Timeout | null = null;
 
-    const stopPolling = () => {
-        if (interval) {
-            clearInterval(interval);
-            interval = null;
-
-            console.log(
-                `Simulation ${simulationId}: event polling stopped.`,
-            );
-        }
-    };
-
     const fetchEvents = async () => {
         try {
-            /*
-             * Check simulation status first.
-             */
-            const simulationResponse =
-                await fetch(
-                    `/api/simulation/runs/${simulationId}`,
-                    {
-                        cache: "no-store",
-                    },
-                );
-
-            if (!simulationResponse.ok) {
-                throw new Error(
-                    "Failed to fetch simulation status",
-                );
-            }
-
-            const simulation =
-                await simulationResponse.json();
-
-            if (cancelled) {
-                return;
-            }
-
-            /*
-             * Once the simulation stops,
-             * stop polling events.
-             *
-             * Existing events remain visible.
-             */
-            if (simulation.status !== "RUNNING") {
-                stopPolling();
-                return;
-            }
-
             setLoading(true);
 
             const response =
@@ -110,8 +61,7 @@ export default function SimulationEvents({
                 return;
             }
 
-            setEvents(data.events);
-            setError(null);
+            setSnapshot({ simulationId, events: data.events, error: null });
         } catch (error) {
             if (cancelled) {
                 return;
@@ -122,9 +72,11 @@ export default function SimulationEvents({
                 error,
             );
 
-            setError(
-                "Failed to fetch simulation events",
-            );
+            setSnapshot({
+                simulationId,
+                events: [],
+                error: error instanceof Error ? error.message : "Failed to fetch simulation events",
+            });
         } finally {
             if (!cancelled) {
                 setLoading(false);
@@ -137,9 +89,7 @@ export default function SimulationEvents({
      */
     fetchEvents();
 
-    /*
-     * Poll while the simulation is running.
-     */
+    /* Poll event history for all run states, including paused and stopped. */
     interval = setInterval(
         fetchEvents,
         2000,
@@ -153,6 +103,10 @@ export default function SimulationEvents({
         }
     };
 }, [simulationId]);
+
+    const current = snapshot?.simulationId === simulationId ? snapshot : null;
+    const events = current?.events ?? [];
+    const error = current?.error ?? null;
 
     return (
         <section className="rounded-2xl border bg-white p-5 shadow-sm">

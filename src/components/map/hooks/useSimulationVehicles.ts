@@ -8,13 +8,13 @@ import type { SimulationVehicle } from "../types/map.types";
 export function useSimulationVehicles(
     simulationId: number | null,
 ) {
-    const [vehicles, setVehicles] = useState<
-        SimulationVehicle[]
-    >([]);
+    const [snapshot, setSnapshot] = useState<{
+        simulationId: number;
+        vehicles: SimulationVehicle[];
+    } | null>(null);
 
     useEffect(() => {
         if (simulationId === null) {
-            setVehicles([]);
             return;
         }
 
@@ -50,29 +50,8 @@ export function useSimulationVehicles(
                     simulation.status,
                 );
 
-                /*
-                 * Simulation has stopped.
-                 */
-                if (
-                    simulation.status !==
-                    "RUNNING"
-                ) {
-                    if (!cancelled) {
-                        setVehicles([]);
-                    }
-
-                    if (interval !== null) {
-                        clearInterval(interval);
-                        interval = null;
-                    }
-
-                    return;
-                }
-
-                /*
-                 * Simulation is running.
-                 * Fetch vehicle positions.
-                 */
+                // Keep generated vehicles visible while CREATED or PAUSED too.
+                // Their positions stay fixed until the engine is running.
                 const response =
                     await fetch(
                         `/api/simulation/runs/${simulationId}/vehicles`,
@@ -108,9 +87,7 @@ export function useSimulationVehicles(
                             "COMPLETED",
                     );
 
-                setVehicles(
-                    activeVehicles,
-                );
+                setSnapshot({ simulationId: Number(simulationId), vehicles: activeVehicles });
             } catch (error) {
                 if (cancelled) {
                     return;
@@ -145,5 +122,5 @@ export function useSimulationVehicles(
         };
     }, [simulationId]);
 
-    return vehicles;
+    return snapshot?.simulationId === simulationId ? snapshot.vehicles : [];
 }
