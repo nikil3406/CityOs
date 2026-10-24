@@ -49,6 +49,7 @@ type CityMapClientProps = {
     onIntersectionSelect?: (id: number) => void;
     signalIndicators?: { intersectionId: number; state: string }[];
     routeCoordinates?: [number, number][];
+    routePreviews?: { strategy: "SHORTEST_DISTANCE" | "FASTEST_TIME"; routeGeometry: [number, number][]; selected: boolean }[];
 };
 
 export default function CityMapClient({
@@ -74,6 +75,7 @@ export default function CityMapClient({
     onIntersectionSelect,
     signalIndicators = [],
     routeCoordinates = [],
+    routePreviews = [],
 }: CityMapClientProps) {
     return (
         <CityMap
@@ -101,6 +103,7 @@ export default function CityMapClient({
             onIntersectionSelect={onIntersectionSelect}
             signalIndicators={signalIndicators}
             routeCoordinates={routeCoordinates}
+            routePreviews={routePreviews}
         />
     );
 }

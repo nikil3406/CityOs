@@ -11,7 +11,12 @@ import { generateVehicles } from "@/modules/vehicle/vehicle.service";
 import { initializeSimulationVehicleStates } from "@/modules/vehicle/vehicle_state.service";
 import { clearSimulationVehicleCache } from "@/modules/vehicle/vehicle_simulation_cache.service";
 import { simulationEngine } from "@/modules/simulation/simulation.engine";
-import { findShortestRoute } from "@/modules/road/routing.service";
+import {
+    validateSelectedRoute,
+    type RouteResult,
+    type RoutingStrategy,
+} from "@/modules/road/routing.service";
+import type { VehicleRouteEndpoints } from "@/modules/vehicle/vehicle.service";
 
 type RouteContext = {
     params: Promise<{ id: string }>;
@@ -35,11 +40,20 @@ export async function POST(
             );
         }
 
-        const body = (await request.json()) as {
+        const parsedBody: unknown = await request.json();
+        if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+            return NextResponse.json({ error: "Request body must be an object" }, { status: 400 });
+        }
+        const body = parsedBody as {
             count?: number;
             sourceIntersectionId?: number;
             destinationIntersectionId?: number;
-            routes?: { sourceIntersectionId: number; destinationIntersectionId: number }[];
+            routes?: {
+                sourceIntersectionId: number;
+                destinationIntersectionId: number;
+                strategy: RoutingStrategy;
+                route: RouteResult;
+            }[];
         };
 
         const count = body.count ?? 10;
@@ -81,27 +95,46 @@ export async function POST(
         const hasSource = body.sourceIntersectionId !== undefined;
         const hasDestination = body.destinationIntersectionId !== undefined;
         if (body.routes !== undefined && !Array.isArray(body.routes)) {
-            return NextResponse.json({ error: "routes must be an array of source/destination pairs" }, { status: 400 });
+            return NextResponse.json({ error: "routes must be an array of selected route previews" }, { status: 400 });
         }
         if ((hasSource !== hasDestination) || (body.routes && (hasSource || hasDestination))) {
             return NextResponse.json({ error: "Provide either a routes array or one source and destination pair" }, { status: 400 });
         }
-        const manualRoutes = body.routes ?? (hasSource && hasDestination ? [{
-            sourceIntersectionId: body.sourceIntersectionId!,
-            destinationIntersectionId: body.destinationIntersectionId!,
-        }] : undefined);
+        if (hasSource && hasDestination) {
+            return NextResponse.json({ error: "Preview and select a route before generating manual vehicles." }, { status: 400 });
+        }
+        const manualRoutes = body.routes;
         if (manualRoutes && (manualRoutes.length === 0 || manualRoutes.length > 25 || manualRoutes.some((route) =>
+            !route || typeof route !== "object" ||
             !Number.isInteger(route.sourceIntersectionId) || route.sourceIntersectionId <= 0 ||
             !Number.isInteger(route.destinationIntersectionId) || route.destinationIntersectionId <= 0 ||
             route.sourceIntersectionId === route.destinationIntersectionId
         ))) {
-            return NextResponse.json({ error: "routes must contain 1–25 pairs of different valid intersection IDs" }, { status: 400 });
+            return NextResponse.json({ error: "routes must contain 1-25 pairs of different valid intersection IDs" }, { status: 400 });
         }
+        const validatedManualRoutes: VehicleRouteEndpoints[] = [];
         if (manualRoutes) {
-            for (const endpoints of manualRoutes) {
-                const route = await findShortestRoute(simulation[0].cityId, endpoints.sourceIntersectionId, endpoints.destinationIntersectionId);
-            if (!route || route.segments.length === 0) {
-                    return NextResponse.json({ error: `No drivable route exists from intersection ${endpoints.sourceIntersectionId} to ${endpoints.destinationIntersectionId}` }, { status: 422 });
+            for (const selection of manualRoutes) {
+                if (
+                    !selection.route ||
+                    (selection.strategy !== "SHORTEST_DISTANCE" && selection.strategy !== "FASTEST_TIME")
+                ) {
+                    return NextResponse.json({ error: "Each manual route must include a valid preview result and strategy. Preview and select a route before generating vehicles." }, { status: 400 });
+                }
+                try {
+                    const route = await validateSelectedRoute(
+                        simulation[0].cityId,
+                        selection.sourceIntersectionId,
+                        selection.destinationIntersectionId,
+                        selection.route,
+                        selection.strategy,
+                    );
+                    validatedManualRoutes.push({ ...selection, route });
+                } catch (error) {
+                    return NextResponse.json(
+                        { error: error instanceof Error ? error.message : "Selected route is invalid. Preview it again." },
+                        { status: 422 },
+                    );
                 }
             }
         }
@@ -110,7 +143,7 @@ export async function POST(
             await generateVehicles(
                 simulationId,
                 count,
-                manualRoutes,
+                validatedManualRoutes.length > 0 ? validatedManualRoutes : undefined,
             );
 
         if (simulationEngine.isRunning(simulationId)) {

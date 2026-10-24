@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 
 import {
-    findShortestRoute,
+    findRoute,
+    type RoutingStrategy,
 } from "@/modules/road/routing.service";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
@@ -47,6 +48,18 @@ export async function GET(
                 ),
             );
 
+        const requestedStrategy = url.searchParams.get("strategy") ?? "SHORTEST_DISTANCE";
+        if (
+            requestedStrategy !== "SHORTEST_DISTANCE" &&
+            requestedStrategy !== "FASTEST_TIME"
+        ) {
+            return NextResponse.json(
+                { error: "strategy must be SHORTEST_DISTANCE or FASTEST_TIME" },
+                { status: 400 },
+            );
+        }
+        const strategy = requestedStrategy as RoutingStrategy;
+
         if (
             !Number.isInteger(start) ||
             !Number.isInteger(destination) ||
@@ -63,10 +76,11 @@ export async function GET(
         }
 
         const route =
-            await findShortestRoute(
+            await findRoute(
                 cityId,
                 start,
                 destination,
+                strategy,
             );
 
         if (!route) {
@@ -102,6 +116,7 @@ export async function GET(
             startIntersectionId: start,
             destinationIntersectionId:
                 destination,
+            strategy,
             routeGeometry,
             ...route,
         });

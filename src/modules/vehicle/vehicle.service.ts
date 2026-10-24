@@ -6,7 +6,9 @@ import { vehicleRoutes } from "@/db/schema";
 import {
     getReachableIntersections,
     findShortestRoute,
+    validateSelectedRoute,
     type RouteResult,
+    type RoutingStrategy,
 } from "@/modules/road/routing.service";
 
 type GeneratedVehicle = {
@@ -41,6 +43,8 @@ type VehiclePlan = {
 export type VehicleRouteEndpoints = {
     sourceIntersectionId: number;
     destinationIntersectionId: number;
+    route: RouteResult;
+    strategy: RoutingStrategy;
 };
 
 /**
@@ -84,6 +88,19 @@ export async function generateVehicles(
         route.sourceIntersectionId === route.destinationIntersectionId
     )) throw new Error("Each route needs two different valid intersections");
 
+    const validatedManualRoutes = manualRoutes
+        ? await Promise.all(manualRoutes.map(async (route) => ({
+              ...route,
+              route: await validateSelectedRoute(
+                  cityId,
+                  route.sourceIntersectionId,
+                  route.destinationIntersectionId,
+                  route.route,
+                  route.strategy,
+              ),
+          })))
+        : null;
+
     const segmentResult = await db.execute(sql`
         SELECT
             rs.id,
@@ -110,14 +127,14 @@ export async function generateVehicles(
             startIntersectionId: Number(segment.startIntersectionId),
             endIntersectionId: Number(segment.endIntersectionId),
         }),
-    ).filter((segment) => !manualRoutes || manualRoutes.some((route) =>
+    ).filter((segment) => !validatedManualRoutes || validatedManualRoutes.some((route) =>
         segment.startIntersectionId === route.sourceIntersectionId ||
         segment.endIntersectionId === route.sourceIntersectionId));
 
     // Manual mode creates the requested fleet on one selected route. Reuse
     // source-connected candidates so vehicle count is not capped by the source
     // intersection's number of adjacent road segments.
-    if (manualRoutes && candidates.length > 0) {
+    if (validatedManualRoutes && candidates.length > 0) {
         const sourceCandidates = [...candidates];
         while (candidates.length < count) {
             candidates.push(
@@ -138,8 +155,8 @@ export async function generateVehicles(
     for (const candidate of candidates) {
         if (plans.length >= count) break;
 
-        const selectedRoute = manualRoutes
-            ? manualRoutes[plans.length % manualRoutes.length]
+        const selectedRoute = validatedManualRoutes
+            ? validatedManualRoutes[plans.length % validatedManualRoutes.length]
             : null;
         const selectedRouteKey = selectedRoute
             ? `${selectedRoute.sourceIntersectionId}:${selectedRoute.destinationIntersectionId}`
@@ -178,11 +195,13 @@ export async function generateVehicles(
         let planForCandidate: VehiclePlan | null = null;
 
         for (const destinationIntersectionId of shuffledDestinations) {
-            const route = await findShortestRoute(
-                cityId,
-                startIntersectionId,
-                destinationIntersectionId,
-            );
+            const route = selectedRoute
+                ? selectedRoute.route
+                : await findShortestRoute(
+                      cityId,
+                      startIntersectionId,
+                      destinationIntersectionId,
+                  );
 
             if (!route || route.segments.length === 0) continue;
 

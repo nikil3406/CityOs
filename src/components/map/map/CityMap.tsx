@@ -66,6 +66,7 @@ type CityMapProps = {
     onIntersectionSelect?: (id: number) => void;
     signalIndicators?: { intersectionId: number; state: string }[];
     routeCoordinates?: [number, number][];
+    routePreviews?: { strategy: "SHORTEST_DISTANCE" | "FASTEST_TIME"; routeGeometry: [number, number][]; selected: boolean }[];
 };
 
 export default function CityMap({
@@ -91,6 +92,7 @@ export default function CityMap({
     onIntersectionSelect,
     signalIndicators = [],
     routeCoordinates = [],
+    routePreviews = [],
 }: CityMapProps) {
 
     /*
@@ -592,7 +594,20 @@ export default function CityMap({
                         ),
                     )}
 
-                {(routeCoordinates.length > 1 || routeIntersectionIds.length > 1) && (
+                {routePreviews.map((preview) => preview.routeGeometry.length > 1 && (
+                    <Polyline
+                        key={preview.strategy}
+                        interactive={false}
+                        positions={preview.routeGeometry.map(([longitude, latitude]) => [latitude, longitude] as [number, number])}
+                        pathOptions={{
+                            color: preview.strategy === "SHORTEST_DISTANCE" ? "#2563eb" : "#9333ea",
+                            weight: preview.selected ? 7 : 4,
+                            opacity: preview.selected ? 1 : 0.55,
+                            dashArray: preview.strategy === "FASTEST_TIME" ? "10 7" : undefined,
+                        }}
+                    />
+                ))}
+                {routePreviews.length === 0 && (routeCoordinates.length > 1 || routeIntersectionIds.length > 1) && (
                     <Polyline interactive={false} positions={routeCoordinates.length > 1 ? routeCoordinates.map(([longitude, latitude]) => [latitude, longitude] as [number, number]) : routeIntersectionIds.flatMap((id) => {
                         const intersection = intersections.find((item) => item.id === id);
                         return intersection ? [[intersection.location[1], intersection.location[0]] as [number, number]] : [];

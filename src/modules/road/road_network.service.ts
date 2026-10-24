@@ -9,7 +9,7 @@ export type NetworkSegment = {
     endIntersectionId: number;
     sequence: number;
     lengthMeters: number;
-    speedLimitKmh: number;
+    speedLimitKmh: number | null;
 };
 
 /** A directed traversal over a physical road segment. */
@@ -51,7 +51,7 @@ async function getNetworkSegments(
             rs.end_intersection_id AS "endIntersectionId",
             rs.sequence,
             rs.length_meters AS "lengthMeters",
-            COALESCE(rs.speed_limit_kmh, 30) AS "speedLimitKmh"
+            rs.speed_limit_kmh AS "speedLimitKmh"
         FROM road_segments rs
         JOIN roads r ON r.id = rs.road_id
         WHERE
@@ -70,7 +70,10 @@ async function getNetworkSegments(
         endIntersectionId: Number(row.endIntersectionId),
         sequence: Number(row.sequence),
         lengthMeters: Number(row.lengthMeters),
-        speedLimitKmh: Number(row.speedLimitKmh),
+        speedLimitKmh:
+            row.speedLimitKmh === null
+                ? null
+                : Number(row.speedLimitKmh),
     }));
 }
 
