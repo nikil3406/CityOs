@@ -5,7 +5,12 @@ import {
     type RoutingStrategy,
 } from "@/modules/road/routing.service";
 import { db } from "@/db";
-import { sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { intersections } from "@/db/schema";
+import {
+    loadSimulationTrafficSnapshot,
+    simulationStatusUsesLiveTraffic,
+} from "@/modules/road/simulation_traffic_snapshot.service";
 
 type RouteContext = {
     params: Promise<{ id: string }>;
@@ -59,6 +64,12 @@ export async function GET(
             );
         }
         const strategy = requestedStrategy as RoutingStrategy;
+        const requestedSimulationId = url.searchParams.has("simulationId")
+            ? Number(url.searchParams.get("simulationId"))
+            : null;
+        if (requestedSimulationId !== null && (!Number.isInteger(requestedSimulationId) || requestedSimulationId <= 0)) {
+            return NextResponse.json({ error: "simulationId must be a positive integer" }, { status: 400 });
+        }
 
         if (
             !Number.isInteger(start) ||
@@ -75,12 +86,46 @@ export async function GET(
             );
         }
 
+        const endpointRows = await db
+            .select({ id: intersections.id })
+            .from(intersections)
+            .where(and(eq(intersections.cityId, cityId), inArray(intersections.id, [start, destination])));
+        const endpointIds = new Set(endpointRows.map((row) => row.id));
+        if (!endpointIds.has(start) || !endpointIds.has(destination)) {
+            return NextResponse.json(
+                { error: "Start and destination must be intersections in the selected city." },
+                { status: 404 },
+            );
+        }
+
+        let selectedSimulationSnapshot;
+        if (requestedSimulationId !== null) {
+            try {
+                selectedSimulationSnapshot = await loadSimulationTrafficSnapshot(requestedSimulationId, cityId);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : "Invalid simulation";
+                if (message.includes("belongs to city")) {
+                    return NextResponse.json({ error: message }, { status: 400 });
+                }
+                throw error;
+            }
+            if (!selectedSimulationSnapshot) {
+                return NextResponse.json({ error: `Simulation run ${requestedSimulationId} was not found.` }, { status: 404 });
+            }
+        }
+        const trafficSnapshot = strategy === "FASTEST_TIME" &&
+            selectedSimulationSnapshot &&
+            simulationStatusUsesLiveTraffic(selectedSimulationSnapshot.status)
+            ? selectedSimulationSnapshot
+            : undefined;
+
         const route =
             await findRoute(
                 cityId,
                 start,
                 destination,
                 strategy,
+                trafficSnapshot,
             );
 
         if (!route) {
@@ -111,6 +156,20 @@ export async function GET(
             routeGeometry.push(...(routeGeometry.length ? ordered.slice(1) : ordered));
         }
 
+        const trafficEstimate = strategy === "FASTEST_TIME" && requestedSimulationId !== null
+            ? trafficSnapshot && route.trafficEstimate
+                ? { ...route.trafficEstimate, simulationStatus: selectedSimulationSnapshot?.status ?? null }
+                : {
+                source: "STATIC" as const,
+                simulationRunId: requestedSimulationId,
+                simulationTime: selectedSimulationSnapshot?.simulationTime ?? null,
+                simulationStatus: selectedSimulationSnapshot?.status ?? null,
+                observedSpeedSegments: 0,
+                heuristicSegments: 0,
+                signalDelaySeconds: 0,
+            }
+            : route.trafficEstimate;
+
         return NextResponse.json({
             cityId,
             startIntersectionId: start,
@@ -119,6 +178,7 @@ export async function GET(
             strategy,
             routeGeometry,
             ...route,
+            ...(trafficEstimate ? { trafficEstimate } : {}),
         });
     } catch (error) {
         console.error(

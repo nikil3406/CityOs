@@ -17,6 +17,7 @@ import {
     type RoutingStrategy,
 } from "@/modules/road/routing.service";
 import type { VehicleRouteEndpoints } from "@/modules/vehicle/vehicle.service";
+import { loadSimulationTrafficSnapshot } from "@/modules/road/simulation_traffic_snapshot.service";
 
 type RouteContext = {
     params: Promise<{ id: string }>;
@@ -113,6 +114,23 @@ export async function POST(
             return NextResponse.json({ error: "routes must contain 1-25 pairs of different valid intersection IDs" }, { status: 400 });
         }
         const validatedManualRoutes: VehicleRouteEndpoints[] = [];
+        const liveSelections = manualRoutes?.filter((selection) =>
+            typeof selection?.route?.trafficEstimate?.source === "string" &&
+                selection.route.trafficEstimate.source.startsWith("LIVE_"),
+        ) ?? [];
+        let liveTrafficSnapshot;
+        if (liveSelections.length > 0) {
+            if (liveSelections.some((selection) => selection.route.trafficEstimate?.simulationRunId !== simulationId)) {
+                return NextResponse.json({ error: "The live traffic preview belongs to a different simulation. Refresh the route preview for this run." }, { status: 422 });
+            }
+            liveTrafficSnapshot = await loadSimulationTrafficSnapshot(simulationId, simulation[0].cityId);
+            if (!liveTrafficSnapshot) {
+                return NextResponse.json({ error: `Simulation run ${simulationId} was not found.` }, { status: 404 });
+            }
+            if (liveTrafficSnapshot.status !== "RUNNING" && liveTrafficSnapshot.status !== "PAUSED") {
+                return NextResponse.json({ error: "This simulation is no longer running or paused. Refresh the route preview to use a static estimate." }, { status: 422 });
+            }
+        }
         if (manualRoutes) {
             for (const selection of manualRoutes) {
                 if (
@@ -128,6 +146,7 @@ export async function POST(
                         selection.destinationIntersectionId,
                         selection.route,
                         selection.strategy,
+                        selection.route.trafficEstimate?.source.startsWith("LIVE_") ? liveTrafficSnapshot : undefined,
                     );
                     validatedManualRoutes.push({ ...selection, route });
                 } catch (error) {
@@ -171,7 +190,11 @@ export async function POST(
                     ? error.message
                     : "Failed to generate vehicles",
             },
-            { status: 500 },
+            {
+                status: error instanceof Error && /selected route|traffic preview/i.test(error.message)
+                    ? 422
+                    : 500,
+            },
         );
     }
 }

@@ -8,6 +8,7 @@ import {
     findShortestRoute,
     validateSelectedRoute,
     type RouteResult,
+    type RouteSegment,
     type RoutingStrategy,
 } from "@/modules/road/routing.service";
 
@@ -46,6 +47,18 @@ export type VehicleRouteEndpoints = {
     route: RouteResult;
     strategy: RoutingStrategy;
 };
+
+export function buildVehicleRouteRows(
+    vehicleId: number,
+    routeSegments: RouteSegment[],
+) {
+    return routeSegments.map((routeSegment, sequence) => ({
+        vehicleId,
+        segmentId: routeSegment.segmentId,
+        sequence,
+        isReverse: routeSegment.isReverse,
+    }));
+}
 
 /**
  * Generate exactly `count` vehicles, or fail before inserting any vehicles if
@@ -87,6 +100,11 @@ export async function generateVehicles(
         route.sourceIntersectionId <= 0 || route.destinationIntersectionId <= 0 ||
         route.sourceIntersectionId === route.destinationIntersectionId
     )) throw new Error("Each route needs two different valid intersections");
+    if (manualRoutes?.some((route) =>
+        typeof route.route.trafficEstimate?.source === "string" &&
+        route.route.trafficEstimate.source.startsWith("LIVE_") &&
+        route.route.trafficEstimate.simulationRunId !== simulationRunId
+    )) throw new Error("A live traffic route preview belongs to a different simulation run");
 
     const validatedManualRoutes = manualRoutes
         ? await Promise.all(manualRoutes.map(async (route) => ({
@@ -333,12 +351,7 @@ export async function generateVehicles(
             const vehicle = vehicleResult[0] as unknown as GeneratedVehicle;
 
             await tx.insert(vehicleRoutes).values(
-                plan.route.segments.map((routeSegment, sequence) => ({
-                    vehicleId: vehicle.id,
-                    segmentId: routeSegment.segmentId,
-                    sequence,
-                    isReverse: routeSegment.isReverse,
-                })),
+                buildVehicleRouteRows(vehicle.id, plan.route.segments),
             );
 
             generatedVehicles.push(vehicle);

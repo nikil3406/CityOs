@@ -60,6 +60,7 @@ export async function POST(
         }
 
         simulationEngine.stop(simulationId);
+        await simulationEngine.waitForIdle(simulationId);
 
         const result = await db
             .update(simulationRuns)

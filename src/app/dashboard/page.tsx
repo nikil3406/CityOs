@@ -56,6 +56,11 @@ export default function DashboardPage() {
         : selectedStrategy === "FASTEST_TIME"
           ? fastestPreview
           : null;
+    const selectedPreviewIsStale = Boolean(
+        selectedPreview?.trafficEstimate?.source.startsWith("LIVE_") &&
+        (selectedPreview.trafficEstimate.simulationRunId !== runId ||
+            (selectedRun?.status !== "RUNNING" && selectedRun?.status !== "PAUSED")),
+    );
 
     const invalidateRoutePreviews = () => {
         previewRequestId.current += 1;
@@ -163,7 +168,7 @@ export default function DashboardPage() {
         setNotice("");
         try {
             const response = await fetch(
-                `/api/cities/${cityId}/route?start=${sourceId}&destination=${destinationId}&strategy=${strategy}`,
+                `/api/cities/${cityId}/route?start=${sourceId}&destination=${destinationId}&strategy=${strategy}${strategy === "FASTEST_TIME" && runId ? `&simulationId=${runId}` : ""}`,
                 { cache: "no-store" },
             );
             const data = await response.json();
@@ -196,6 +201,10 @@ export default function DashboardPage() {
             setNotice("Preview and select a valid route before adding it to the vehicle plan.");
             return;
         }
+        if (selectedPreviewIsStale) {
+            setNotice("Live traffic changed after this preview. Refresh the fastest-path preview before adding it.");
+            return;
+        }
         if (manualRoutes.some((route) => route.sourceIntersectionId === sourceId && route.destinationIntersectionId === destinationId)) {
             setNotice("That source and destination pair is already in the route list.");
             return;
@@ -204,12 +213,12 @@ export default function DashboardPage() {
             setNotice("You can add up to 25 routes per vehicle generation batch.");
             return;
         }
-        const { intersections, segments, totalDistanceMeters, estimatedTravelTimeSeconds, estimatedTravelTimeUsesDefaultSpeedLimit } = selectedPreview;
+        const { intersections, segments, totalDistanceMeters, estimatedTravelTimeSeconds, estimatedTravelTimeUsesDefaultSpeedLimit, trafficEstimate } = selectedPreview;
         setManualRoutes((current) => [...current, {
             sourceIntersectionId: sourceId,
             destinationIntersectionId: destinationId,
             strategy: selectedPreview.strategy,
-            route: { intersections, segments, totalDistanceMeters, estimatedTravelTimeSeconds, estimatedTravelTimeUsesDefaultSpeedLimit },
+            route: { intersections, segments, totalDistanceMeters, estimatedTravelTimeSeconds, estimatedTravelTimeUsesDefaultSpeedLimit, trafficEstimate },
         }]);
         setNotice(`Added route #${sourceId} → #${destinationId}.`);
         setSourceId(null);
@@ -257,7 +266,7 @@ export default function DashboardPage() {
                 </section>
                 <aside className="space-y-5">
                     <section className={`${panel} p-5`}><div className="flex items-start justify-between"><div><h2 className="font-semibold">Simulation runs</h2><p className="mt-1 text-xs text-slate-500">Manage lifecycle for {cityName}</p></div><button disabled={busy} onClick={createRun} className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">+ New run</button></div>
-                        <select aria-label="Simulation run" value={runId ?? ""} onChange={(e) => setRunId(e.target.value ? Number(e.target.value) : null)} className="mt-4 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm"><option value="">Select a run…</option>{runs.filter((run) => run.cityId === cityId).map((run) => <option key={run.id} value={run.id}>Run #{run.id} · {run.status} · T+{run.simulationTime}s</option>)}</select>
+                        <select aria-label="Simulation run" value={runId ?? ""} onChange={(e) => { setRunId(e.target.value ? Number(e.target.value) : null); setManualRoutes([]); invalidateRoutePreviews(); }} className="mt-4 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm"><option value="">Select a run…</option>{runs.filter((run) => run.cityId === cityId).map((run) => <option key={run.id} value={run.id}>Run #{run.id} · {run.status} · T+{run.simulationTime}s</option>)}</select>
                         <div className="mt-3 grid grid-cols-3 gap-2"><button disabled={busy || !selectedRun || !["CREATED", "PAUSED"].includes(selectedRun.status)} onClick={() => void runAction("start")} className="rounded-lg bg-emerald-600 px-2 py-2.5 text-xs font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400">{selectedRun?.status === "PAUSED" ? "Resume" : "Start"}</button><button disabled={busy || selectedRun?.status !== "RUNNING"} onClick={() => void runAction("pause")} className="rounded-lg border border-slate-200 px-2 py-2.5 text-xs font-bold disabled:cursor-not-allowed disabled:text-slate-300">Pause</button><button disabled={busy || !selectedRun || !["RUNNING", "PAUSED"].includes(selectedRun.status)} onClick={() => void runAction("stop")} className="rounded-lg border border-red-200 px-2 py-2.5 text-xs font-bold text-red-700 disabled:cursor-not-allowed disabled:text-slate-300">Stop</button></div>
                     </section>
                     <section className={`${panel} p-5`}><div className="flex items-center justify-between"><div><h2 className="font-semibold">Vehicle generation</h2><p className="mt-1 text-xs text-slate-500">Real route plans on the city road network</p></div></div><div className="mt-4 flex rounded-lg bg-slate-100 p-1"><button onClick={() => setMode("automatic")} className={`flex-1 rounded-md py-2 text-xs font-semibold ${mode === "automatic" ? "bg-white shadow-sm" : "text-slate-500"}`}>Automatic</button><button onClick={() => setMode("manual")} className={`flex-1 rounded-md py-2 text-xs font-semibold ${mode === "manual" ? "bg-white shadow-sm" : "text-slate-500"}`}>Source & destination</button></div>
@@ -279,7 +288,8 @@ export default function DashboardPage() {
                                 {shortestPreview ? <button type="button" role="radio" aria-checked={selectedStrategy === "SHORTEST_DISTANCE"} onClick={() => setSelectedStrategy("SHORTEST_DISTANCE")} className={`rounded-lg border p-3 text-left ${selectedStrategy === "SHORTEST_DISTANCE" ? "border-blue-500 bg-blue-50 ring-1 ring-blue-300" : "border-slate-200 bg-white"}`}><div className="flex items-center justify-between gap-2"><span className="font-semibold text-blue-800">Shortest-distance route</span><span aria-hidden="true">{selectedStrategy === "SHORTEST_DISTANCE" ? "Selected" : "Select"}</span></div><div className="mt-1 text-xs text-slate-600">{(shortestPreview.totalDistanceMeters / 1000).toFixed(2)} km / {shortestPreview.estimatedTravelTimeSeconds === null ? "Travel time unavailable (invalid or missing speed limit)" : `${Math.ceil(shortestPreview.estimatedTravelTimeSeconds / 60)} min estimated${shortestPreview.estimatedTravelTimeUsesDefaultSpeedLimit ? " (30 km/h assumed where missing)" : ""}`} / {shortestPreview.segments.length} road segments</div><div className="mt-1 break-words text-[11px] text-slate-500">Intersections: {shortestPreview.intersections.join(" -> ")}</div></button> : <p className="rounded-lg border border-slate-200 p-3 text-xs text-slate-500">Shortest-distance route unavailable.</p>}
                                 {fastestPreview ? <button type="button" role="radio" aria-checked={selectedStrategy === "FASTEST_TIME"} onClick={() => setSelectedStrategy("FASTEST_TIME")} className={`rounded-lg border p-3 text-left ${selectedStrategy === "FASTEST_TIME" ? "border-purple-500 bg-purple-50 ring-1 ring-purple-300" : "border-slate-200 bg-white"}`}><div className="flex items-center justify-between gap-2"><span className="font-semibold text-purple-800">Fastest-time route</span><span aria-hidden="true">{selectedStrategy === "FASTEST_TIME" ? "Selected" : "Select"}</span></div><div className="mt-1 text-xs text-slate-600">{(fastestPreview.totalDistanceMeters / 1000).toFixed(2)} km / {fastestPreview.estimatedTravelTimeSeconds === null ? "Travel time unavailable" : `${Math.ceil(fastestPreview.estimatedTravelTimeSeconds / 60)} min estimated${fastestPreview.estimatedTravelTimeUsesDefaultSpeedLimit ? " (30 km/h assumed where missing)" : ""}`} / {fastestPreview.segments.length} road segments</div><div className="mt-1 break-words text-[11px] text-slate-500">Intersections: {fastestPreview.intersections.join(" -> ")}</div></button> : <p className="rounded-lg border border-slate-200 p-3 text-xs text-slate-500">Fastest-time route unavailable.</p>}
                             </div>}
-                            <button onClick={addManualRoute} disabled={!sourceId || !destinationId || !selectedPreview || manualRoutes.length >= 25 || busy || previewingStrategy !== null} className="mt-3 w-full rounded-lg bg-blue-700 py-2 text-xs font-semibold text-white disabled:opacity-40">Add selected route</button>
+                            {selectedStrategy === "FASTEST_TIME" && fastestPreview && <p className="mt-2 rounded-lg bg-purple-50 p-2 text-[11px] text-purple-900">{fastestPreview.trafficEstimate?.source === "STATIC" ? `Static estimate${fastestPreview.trafficEstimate.simulationStatus ? `; no live traffic used from ${fastestPreview.trafficEstimate.simulationStatus} run` : " (no live simulation selected)"}.` : fastestPreview.trafficEstimate?.source === "LIVE_SIGNAL" ? "Live signal timing influenced route selection." : `Live traffic influenced route selection using ${fastestPreview.trafficEstimate?.observedSpeedSegments ?? 0} observed-speed and ${fastestPreview.trafficEstimate?.heuristicSegments ?? 0} occupancy/queue segment estimates.`}{(fastestPreview.trafficEstimate?.signalDelaySeconds ?? 0) > 0 ? ` Selected path includes ${Math.ceil(fastestPreview.trafficEstimate!.signalDelaySeconds)}s estimated signal delay.` : fastestPreview.trafficEstimate?.source.startsWith("LIVE_") ? " No additional signal delay was added to this selected path." : " Signal delay was omitted where movement timing data was unavailable."}</p>}
+                            <button onClick={addManualRoute} disabled={!sourceId || !destinationId || !selectedPreview || selectedPreviewIsStale || manualRoutes.length >= 25 || busy || previewingStrategy !== null} className="mt-3 w-full rounded-lg bg-blue-700 py-2 text-xs font-semibold text-white disabled:opacity-40">{selectedPreviewIsStale ? "Refresh preview to add route" : "Add selected route"}</button>
                             <div className="mt-3 rounded-lg bg-slate-50 p-3"><div className="flex items-center justify-between text-xs font-semibold text-slate-700"><span>Routes in this batch</span><span>{manualRoutes.length}/25</span></div>{manualRoutes.length === 0 ? <p className="mt-2 text-xs text-slate-500">Preview both route types, select one, and add it here. Vehicles will be distributed across the listed routes.</p> : <ul className="mt-2 space-y-1.5">{manualRoutes.map((route, index) => <li key={`${route.sourceIntersectionId}-${route.destinationIntersectionId}`} className="flex items-center justify-between gap-2 rounded-md bg-white px-2 py-1.5 text-xs"><span>Route {index + 1}: #{route.sourceIntersectionId} / #{route.destinationIntersectionId} / {route.strategy === "SHORTEST_DISTANCE" ? "Shortest" : "Fastest"} / {(route.route.totalDistanceMeters / 1000).toFixed(2)} km / {route.route.estimatedTravelTimeSeconds === null ? "time unavailable" : `${Math.ceil(route.route.estimatedTravelTimeSeconds / 60)} min${route.route.estimatedTravelTimeUsesDefaultSpeedLimit ? " (estimated)" : ""}`}</span><button type="button" aria-label={`Clear route ${index + 1}`} title={`Clear route ${index + 1}`} onClick={() => setManualRoutes((current) => current.filter((_, routeIndex) => routeIndex !== index))} className="rounded border border-red-200 px-2 py-1 font-semibold text-red-600 hover:bg-red-50">Clear</button></li>)}</ul>}</div>
                         </>}
                         <button disabled={busy || !canGenerate} onClick={() => void generate()} className="mt-3 w-full rounded-lg bg-slate-900 px-3 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300">{busy ? "Working…" : "Generate vehicles"}</button></section>

@@ -3,6 +3,13 @@ import {
     getVehicleRoadNetwork,
     type NetworkSegment,
 } from "../road/road_network.service";
+import {
+    buildSegmentTrafficStats,
+    loadSimulationTrafficSnapshot,
+    simulationStatusUsesLiveTraffic,
+    type SimulationTrafficSnapshot,
+    type SegmentTrafficStats,
+} from "./simulation_traffic_snapshot.service";
 
 export type RoutingStrategy = "SHORTEST_DISTANCE" | "FASTEST_TIME";
 /** Matches vehicle movement's speed fallback for roads without stored limits. */
@@ -19,6 +26,15 @@ export type RouteResult = {
     totalDistanceMeters: number;
     estimatedTravelTimeSeconds: number | null;
     estimatedTravelTimeUsesDefaultSpeedLimit: boolean;
+    trafficEstimate?: {
+        source: "STATIC" | "LIVE_OBSERVED" | "LIVE_HEURISTIC" | "LIVE_SIGNAL" | "LIVE_MIXED";
+        simulationRunId: number | null;
+        simulationTime: number | null;
+        simulationStatus?: string | null;
+        observedSpeedSegments: number;
+        heuristicSegments: number;
+        signalDelaySeconds: number;
+    };
 };
 
 /** Return every intersection reachable from the supplied starting intersection. */
@@ -58,11 +74,95 @@ function emptyRoute(intersectionId: number): RouteResult {
     };
 }
 
-function findRouteOnNetwork(
+function routeSegmentTravelTime(
+    segment: NetworkSegment,
+    isReverse: boolean,
+    snapshot?: SimulationTrafficSnapshot,
+    trafficStats?: Map<string, SegmentTrafficStats>,
+): { seconds: number; method: "STATIC" | "LIVE_OBSERVED" | "LIVE_HEURISTIC"; stats?: SegmentTrafficStats } {
+    const length = Number(segment.lengthMeters);
+    const storedSpeed = segment.speedLimitKmh;
+    const hasValidSpeed = storedSpeed !== null && Number.isFinite(storedSpeed) && storedSpeed > 0;
+    const speedLimit = hasValidSpeed ? storedSpeed : DEFAULT_ROUTE_SPEED_LIMIT_KMH;
+    const freeFlowSeconds = (length * 3.6) / speedLimit;
+    if (!snapshot) return { seconds: freeFlowSeconds, method: "STATIC" };
+
+    const stats = trafficStats?.get(`${segment.id}:${isReverse}`) ?? {
+        vehicleCount: 0,
+        averageSpeedKmh: 0,
+        queueVehicleCount: 0,
+        queueLengthMeters: 0,
+        signalWaitingVehicleCount: 0,
+    };
+    // Three direction-matched observations are the minimum for using measured speeds.
+    if (stats.vehicleCount >= 3) {
+        const observedSpeed = Math.max(1, Math.min(speedLimit, stats.averageSpeedKmh));
+        return {
+            seconds: (length * 3.6) / observedSpeed,
+            method: "LIVE_OBSERVED",
+            stats,
+        };
+    }
+
+    if (stats.vehicleCount > 0) {
+        // Sparse samples use an explicit one-lane occupancy heuristic (7.5 m per vehicle).
+        // A detected stopped queue uses its measured physical extent instead, avoiding
+        // counting the same queued vehicles twice.
+        const occupancyRatio = Math.min(1, (stats.vehicleCount * 7.5) / Math.max(length, 1));
+        const multiplier = stats.queueVehicleCount > 0
+            ? 1 + Math.min(1, stats.queueLengthMeters / Math.max(length, 1))
+            : 1 + 0.5 * occupancyRatio;
+        return {
+            seconds: freeFlowSeconds * multiplier,
+            method: "LIVE_HEURISTIC",
+            stats,
+        };
+    }
+
+    return { seconds: freeFlowSeconds, method: "STATIC", ...(snapshot ? { stats } : {}) };
+}
+
+function signalDelaySeconds(
+    snapshot: SimulationTrafficSnapshot,
+    intersectionId: number,
+    fromRoadId: number,
+    toRoadId: number,
+): number | null {
+    const light = snapshot.signals.find(
+        (candidate) => candidate.intersectionId === intersectionId && candidate.status === "ACTIVE",
+    );
+    if (!light || light.phases.length === 0) return null;
+
+    const movementState = (phaseNumber: number) => light.movements.find(
+        (movement) => movement.phaseNumber === phaseNumber &&
+            movement.fromRoadId === fromRoadId && movement.toRoadId === toRoadId,
+    )?.state;
+    if (!light.movements.some((movement) =>
+        movement.fromRoadId === fromRoadId && movement.toRoadId === toRoadId,
+    )) return null;
+
+    const currentIndex = light.phases.findIndex((phase) => phase.phaseNumber === light.currentPhase);
+    if (currentIndex < 0) return null;
+    const currentState = movementState(light.currentPhase);
+    if (currentState === "GREEN" || currentState === "YELLOW") return 0;
+
+    const currentPhase = light.phases[currentIndex];
+    let delay = Math.max(0, currentPhase.durationSeconds - light.phaseElapsed);
+    for (let offset = 1; offset <= light.phases.length; offset++) {
+        const phase = light.phases[(currentIndex + offset) % light.phases.length];
+        const state = movementState(phase.phaseNumber);
+        if (state === "GREEN" || state === "YELLOW") return delay;
+        delay += Math.max(0, phase.durationSeconds);
+    }
+    return null;
+}
+
+export function findRouteOnNetwork(
     networkSegments: NetworkSegment[],
     startIntersectionId: number,
     destinationIntersectionId: number,
     strategy: RoutingStrategy,
+    trafficSnapshot?: SimulationTrafficSnapshot,
 ): RouteResult | null {
     if (
         !Number.isInteger(startIntersectionId) ||
@@ -85,86 +185,137 @@ function findRouteOnNetwork(
         return null;
     }
 
-    const distances = new Map<number, number>();
-    const previous = new Map<
-        number,
-        { intersectionId: number; segmentId: number; isReverse: boolean }
-    >();
-    const unvisited = new Set<number>(graph.keys());
-
+    const useTraversalStates = strategy === "FASTEST_TIME" && trafficSnapshot !== undefined;
+    type SearchState = { key: string; intersectionId: number; incomingSegment: RouteSegment | null };
+    const states = new Map<string, SearchState>();
+    const startKey = useTraversalStates ? `start:${startIntersectionId}` : `node:${startIntersectionId}`;
+    const distances = new Map<string, number>();
+    const previous = new Map<string, { stateKey: string; segment: RouteSegment }>();
+    const unvisited = new Set<string>();
+    const segmentsById = new Map(networkSegments.map((segment) => [segment.id, segment]));
+    const trafficStats = trafficSnapshot
+        ? buildSegmentTrafficStats(trafficSnapshot, networkSegments)
+        : undefined;
+    const observedCostSegments = new Set<string>();
+    const heuristicCostSegments = new Set<string>();
+    let signalCostInfluencedRouteSearch = false;
     for (const intersectionId of graph.keys()) {
-        distances.set(intersectionId, Infinity);
+        if (useTraversalStates && intersectionId !== startIntersectionId) continue;
+        const key = useTraversalStates ? startKey : `node:${intersectionId}`;
+        states.set(key, { key, intersectionId, incomingSegment: null });
+        distances.set(key, intersectionId === startIntersectionId ? 0 : Infinity);
+        unvisited.add(key);
     }
-    distances.set(startIntersectionId, 0);
 
     while (unvisited.size > 0) {
-        let current: number | null = null;
+        let current: string | null = null;
         let currentCost = Infinity;
 
-        for (const intersectionId of unvisited) {
-            const cost = distances.get(intersectionId) ?? Infinity;
+        for (const stateKey of unvisited) {
+            const cost = distances.get(stateKey) ?? Infinity;
             if (cost < currentCost) {
                 currentCost = cost;
-                current = intersectionId;
+                current = stateKey;
             }
         }
 
         if (current === null || currentCost === Infinity) break;
-        if (current === destinationIntersectionId) break;
+        const currentState = states.get(current)!;
+        if (currentState.intersectionId === destinationIntersectionId) break;
         unvisited.delete(current);
 
-        for (const edge of graph.get(current) ?? []) {
-            if (!unvisited.has(edge.to)) continue;
+        for (const edge of graph.get(currentState.intersectionId) ?? []) {
 
             const edgeLength = Number(edge.segment.lengthMeters);
             if (!Number.isFinite(edgeLength) || edgeLength < 0) continue;
 
             let edgeCost = edgeLength;
             if (strategy === "FASTEST_TIME") {
-                const storedSpeedLimit = edge.segment.speedLimitKmh;
-                const speedLimit = storedSpeedLimit !== null && Number.isFinite(storedSpeedLimit) && storedSpeedLimit > 0
-                    ? storedSpeedLimit
-                    : DEFAULT_ROUTE_SPEED_LIMIT_KMH;
-                edgeCost = (edgeLength * 3.6) / speedLimit;
+                const estimate = routeSegmentTravelTime(edge.segment, edge.isReverse, trafficSnapshot, trafficStats);
+                edgeCost = estimate.seconds;
+                const traversalKey = `${edge.segment.id}:${edge.isReverse}`;
+                if (estimate.method === "LIVE_OBSERVED") observedCostSegments.add(traversalKey);
+                if (estimate.method === "LIVE_HEURISTIC") heuristicCostSegments.add(traversalKey);
+                if (trafficSnapshot && currentState.incomingSegment) {
+                    const incoming = segmentsById.get(currentState.incomingSegment.segmentId);
+                    // Measured approach speeds and detected queues already represent
+                    // intersection delay, so don't add a second signal penalty.
+                    const delayAlreadyObserved = incoming && (() => {
+                        const stats = trafficStats?.get(
+                            `${incoming.id}:${currentState.incomingSegment!.isReverse}`,
+                        );
+                        return (stats?.vehicleCount ?? 0) >= 3 ||
+                            (stats?.queueVehicleCount ?? 0) > 0 ||
+                            (stats?.signalWaitingVehicleCount ?? 0) > 0;
+                    })();
+                    if (incoming && !delayAlreadyObserved) {
+                        const signalDelay = signalDelaySeconds(
+                            trafficSnapshot,
+                            currentState.intersectionId,
+                            incoming.roadId,
+                            edge.segment.roadId,
+                        );
+                        if (signalDelay !== null && signalDelay > 0) signalCostInfluencedRouteSearch = true;
+                        edgeCost += signalDelay ?? 0;
+                    }
+                }
             }
 
             const newCost = currentCost + edgeCost;
-            const oldCost = distances.get(edge.to) ?? Infinity;
+            const nextKey = useTraversalStates
+                ? `edge:${edge.segment.id}:${edge.isReverse ? 1 : 0}`
+                : `node:${edge.to}`;
+            if (!states.has(nextKey)) {
+                states.set(nextKey, {
+                    key: nextKey,
+                    intersectionId: edge.to,
+                    incomingSegment: { segmentId: edge.segment.id, isReverse: edge.isReverse },
+                });
+                distances.set(nextKey, Infinity);
+                unvisited.add(nextKey);
+            }
+            if (!unvisited.has(nextKey)) continue;
+            const oldCost = distances.get(nextKey) ?? Infinity;
             if (newCost < oldCost) {
-                distances.set(edge.to, newCost);
-                previous.set(edge.to, {
-                    intersectionId: current,
-                    segmentId: edge.segment.id,
-                    isReverse: edge.isReverse,
+                distances.set(nextKey, newCost);
+                previous.set(nextKey, {
+                    stateKey: current,
+                    segment: { segmentId: edge.segment.id, isReverse: edge.isReverse },
                 });
             }
         }
     }
 
-    const routeCost = distances.get(destinationIntersectionId);
-    if (routeCost === undefined || !Number.isFinite(routeCost)) return null;
+    const goalStateKey = Array.from(states.values())
+        .filter((state) => state.intersectionId === destinationIntersectionId)
+        .sort((a, b) => (distances.get(a.key) ?? Infinity) - (distances.get(b.key) ?? Infinity))[0]?.key;
+    const routeCost = goalStateKey ? distances.get(goalStateKey) : undefined;
+    if (!goalStateKey || routeCost === undefined || !Number.isFinite(routeCost)) return null;
 
-    const intersections = [destinationIntersectionId];
     const segments: RouteSegment[] = [];
-    let current = destinationIntersectionId;
-    while (current !== startIntersectionId) {
-        const previousNode = previous.get(current);
+    let cursor: string | undefined = goalStateKey;
+    while (cursor && cursor !== startKey) {
+        const previousNode = previous.get(cursor);
         if (!previousNode) return null;
-        segments.push({
-            segmentId: previousNode.segmentId,
-            isReverse: previousNode.isReverse,
-        });
-        current = previousNode.intersectionId;
-        intersections.push(current);
+        segments.push(previousNode.segment);
+        cursor = previousNode.stateKey;
     }
-    intersections.reverse();
     segments.reverse();
+    const intersections = [startIntersectionId];
+    for (const routeSegment of segments) {
+        const segment = segmentsById.get(routeSegment.segmentId);
+        if (!segment) return null;
+        intersections.push(routeSegment.isReverse ? segment.startIntersectionId : segment.endIntersectionId);
+    }
 
-    const segmentsById = new Map(networkSegments.map((segment) => [segment.id, segment]));
     let totalDistanceMeters = 0;
     let estimatedTravelTimeSeconds = 0;
     let estimatedTravelTimeUsesDefaultSpeedLimit = false;
-    for (const routeSegment of segments) {
+    let observedSpeedSegments = 0;
+    let heuristicSegments = 0;
+    let signalDelayTotal = 0;
+    for (let routeIndex = 0; routeIndex < segments.length; routeIndex++) {
+        const routeSegment = segments[routeIndex];
         const segment = segmentsById.get(routeSegment.segmentId);
         if (!segment) return null;
         const length = Number(segment.lengthMeters);
@@ -173,10 +324,48 @@ function findRouteOnNetwork(
 
         const storedSpeed = segment.speedLimitKmh;
         const hasValidStoredSpeed = storedSpeed !== null && Number.isFinite(storedSpeed) && storedSpeed > 0;
-        const speed = hasValidStoredSpeed ? storedSpeed : DEFAULT_ROUTE_SPEED_LIMIT_KMH;
         if (!hasValidStoredSpeed) estimatedTravelTimeUsesDefaultSpeedLimit = true;
-        estimatedTravelTimeSeconds += (length * 3.6) / speed;
+        const estimate = routeSegmentTravelTime(segment, routeSegment.isReverse, trafficSnapshot, trafficStats);
+        estimatedTravelTimeSeconds += estimate.seconds;
+        if (
+            trafficSnapshot &&
+            estimate.stats &&
+            estimate.method !== "LIVE_OBSERVED" &&
+            estimate.stats.queueVehicleCount === 0 &&
+            estimate.stats.signalWaitingVehicleCount === 0
+        ) {
+            // Occupancy-only penalties do not represent waiting at the next signal.
+            const nextSegment = segments[routeIndex + 1];
+            if (nextSegment) {
+                const next = segmentsById.get(nextSegment.segmentId);
+                const currentIntersection = intersections[routeIndex + 1];
+                if (next) {
+                    signalDelayTotal += signalDelaySeconds(
+                        trafficSnapshot,
+                        currentIntersection,
+                        segment.roadId,
+                        next.roadId,
+                    ) ?? 0;
+                }
+            }
+        }
     }
+    estimatedTravelTimeSeconds += signalDelayTotal;
+
+    observedSpeedSegments = observedCostSegments.size;
+    heuristicSegments = heuristicCostSegments.size;
+    const usedSignalData = signalCostInfluencedRouteSearch || signalDelayTotal > 0;
+    const liveSource = observedSpeedSegments > 0 && (heuristicSegments > 0 || usedSignalData)
+        ? "LIVE_MIXED"
+        : observedSpeedSegments > 0
+          ? "LIVE_OBSERVED"
+          : heuristicSegments > 0 && usedSignalData
+            ? "LIVE_MIXED"
+            : heuristicSegments > 0
+            ? "LIVE_HEURISTIC"
+            : usedSignalData
+              ? "LIVE_SIGNAL"
+              : "STATIC";
 
     return {
         intersections,
@@ -186,6 +375,16 @@ function findRouteOnNetwork(
             ? estimatedTravelTimeSeconds
             : null,
         estimatedTravelTimeUsesDefaultSpeedLimit,
+        ...(strategy === "FASTEST_TIME" ? {
+            trafficEstimate: {
+                source: liveSource as "STATIC" | "LIVE_OBSERVED" | "LIVE_HEURISTIC" | "LIVE_SIGNAL" | "LIVE_MIXED",
+                simulationRunId: trafficSnapshot?.simulationRunId ?? null,
+                simulationTime: trafficSnapshot?.simulationTime ?? null,
+                observedSpeedSegments,
+                heuristicSegments,
+                signalDelaySeconds: signalDelayTotal,
+            },
+        } : {}),
     };
 }
 
@@ -194,6 +393,7 @@ export async function findRoute(
     startIntersectionId: number,
     destinationIntersectionId: number,
     strategy: RoutingStrategy,
+    trafficSnapshot?: SimulationTrafficSnapshot,
 ): Promise<RouteResult | null> {
     const { segments } = await getVehicleRoadNetwork(cityId);
     return findRouteOnNetwork(
@@ -201,6 +401,7 @@ export async function findRoute(
         startIntersectionId,
         destinationIntersectionId,
         strategy,
+        trafficSnapshot,
     );
 }
 
@@ -239,7 +440,27 @@ export async function validateSelectedRoute(
     destinationIntersectionId: number,
     selectedRoute: RouteResult,
     strategy: RoutingStrategy,
+    trafficSnapshot?: SimulationTrafficSnapshot,
 ): Promise<RouteResult> {
+    let selectedTrafficSnapshot = trafficSnapshot;
+    const trafficEstimate = selectedRoute && typeof selectedRoute === "object" &&
+        selectedRoute.trafficEstimate && typeof selectedRoute.trafficEstimate === "object"
+        ? selectedRoute.trafficEstimate
+        : undefined;
+    if (typeof trafficEstimate?.source === "string" && trafficEstimate.source.startsWith("LIVE_")) {
+        const selectedRunId = trafficEstimate.simulationRunId;
+        if (!Number.isInteger(selectedRunId) || selectedRunId === null) {
+            throw new Error("Live traffic preview has no simulation ID. Preview the route again.");
+        }
+        selectedTrafficSnapshot ??= await loadSimulationTrafficSnapshot(selectedRunId, cityId) ?? undefined;
+        if (
+            !selectedTrafficSnapshot ||
+            selectedTrafficSnapshot.simulationRunId !== selectedRunId ||
+            !simulationStatusUsesLiveTraffic(selectedTrafficSnapshot.status)
+        ) {
+            throw new Error("The simulation traffic preview is no longer current. Refresh the route preview.");
+        }
+    }
     const { segments: networkSegments } = await getVehicleRoadNetwork(cityId);
     const segmentsById = new Map(networkSegments.map((segment) => [segment.id, segment]));
     const fail = (): never => {
@@ -302,6 +523,7 @@ export async function validateSelectedRoute(
         startIntersectionId,
         destinationIntersectionId,
         strategy,
+        selectedTrafficSnapshot,
     );
     if (
         !currentStrategyRoute ||
@@ -322,6 +544,7 @@ export async function validateSelectedRoute(
             ? estimatedTravelTimeSeconds
             : null,
         estimatedTravelTimeUsesDefaultSpeedLimit,
+        ...(selectedRoute.trafficEstimate ? { trafficEstimate: { ...selectedRoute.trafficEstimate } } : {}),
     };
 }
 
