@@ -9,7 +9,7 @@ import {
 } from "@/db/schema";
 
 import {
-    classifyIntersectionMovements,
+    classifyAllIntersectionMovements,
 } from "@/modules/road/road_geometry.service";
 
 import {
@@ -22,6 +22,11 @@ import {
     type TrafficLightPhaseNumber,
     type TrafficLightMovementState,
 } from "./traffic_light_strategy";
+
+import {
+    clearTrafficLightCache,
+    loadTrafficLightCache,
+} from "./traffic_light_cache.service";
 
 
 
@@ -74,20 +79,19 @@ export async function generateTrafficLightConfiguration(
             intersectionId,
         );
 
+    const connectedSegments = Array.from(
+        new Map(
+            [
+                ...topology.incomingSegments,
+                ...topology.outgoingSegments,
+            ].map((segment) => [segment.id, segment]),
+        ).values(),
+    );
+
     const movements =
-        await classifyIntersectionMovements(
-            topology.incomingSegments.map(
-                (segment) => ({
-                    id: segment.id,
-                    roadId: segment.roadId,
-                }),
-            ),
-            topology.outgoingSegments.map(
-                (segment) => ({
-                    id: segment.id,
-                    roadId: segment.roadId,
-                }),
-            ),
+        await classifyAllIntersectionMovements(
+            connectedSegments,
+            intersectionId,
         );
 
     return movements.map(
@@ -237,6 +241,10 @@ export async function configureTrafficLight(
             );
     });
 
+    // Signal reads during simulation use the in-memory cache. Reload it so
+    // vehicles see the newly persisted movement states and phase schedule.
+    clearTrafficLightCache(light.cityId);
+    await loadTrafficLightCache(light.cityId);
 
     return {
         trafficLightId,

@@ -16,10 +16,12 @@ type SimulationEvent = {
 
 type SimulationEventsProps = {
     simulationId: number | null;
+    isRunning: boolean;
 };
 
 export default function SimulationEvents({
     simulationId,
+    isRunning,
 }: SimulationEventsProps) {
     const [snapshot, setSnapshot] = useState<{
         simulationId: number;
@@ -34,7 +36,7 @@ export default function SimulationEvents({
     if (simulationId === null) return;
 
     let cancelled = false;
-    let interval: NodeJS.Timeout | null = null;
+    let interval: ReturnType<typeof setInterval> | null = null;
 
     const fetchEvents = async () => {
         try {
@@ -89,11 +91,9 @@ export default function SimulationEvents({
      */
     fetchEvents();
 
-    /* Poll event history for all run states, including paused and stopped. */
-    interval = setInterval(
-        fetchEvents,
-        2000,
-    );
+    if (isRunning) {
+        interval = setInterval(fetchEvents, 2000);
+    }
 
     return () => {
         cancelled = true;
@@ -102,7 +102,7 @@ export default function SimulationEvents({
             clearInterval(interval);
         }
     };
-}, [simulationId]);
+}, [simulationId, isRunning]);
 
     const current = snapshot?.simulationId === simulationId ? snapshot : null;
     const events = current?.events ?? [];

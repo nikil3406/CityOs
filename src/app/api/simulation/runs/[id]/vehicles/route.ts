@@ -39,6 +39,7 @@ export async function POST(
             count?: number;
             sourceIntersectionId?: number;
             destinationIntersectionId?: number;
+            routes?: { sourceIntersectionId: number; destinationIntersectionId: number }[];
         };
 
         const count = body.count ?? 10;
@@ -60,6 +61,7 @@ export async function POST(
         const simulation = await db
             .select({
                 id: simulationRuns.id,
+                cityId: simulationRuns.cityId,
                 status: simulationRuns.status,
             })
             .from(simulationRuns)
@@ -78,19 +80,29 @@ export async function POST(
 
         const hasSource = body.sourceIntersectionId !== undefined;
         const hasDestination = body.destinationIntersectionId !== undefined;
-        if (hasSource !== hasDestination || (hasSource && (
-            !Number.isInteger(body.sourceIntersectionId) || body.sourceIntersectionId! <= 0 ||
-            !Number.isInteger(body.destinationIntersectionId) || body.destinationIntersectionId! <= 0 ||
-            body.sourceIntersectionId === body.destinationIntersectionId
-        ))) {
-            return NextResponse.json({ error: "Provide two different valid source and destination intersection IDs" }, { status: 400 });
+        if (body.routes !== undefined && !Array.isArray(body.routes)) {
+            return NextResponse.json({ error: "routes must be an array of source/destination pairs" }, { status: 400 });
         }
-        if (hasSource) {
-            const [run] = await db.select({ cityId: simulationRuns.cityId }).from(simulationRuns)
-                .where(eq(simulationRuns.id, simulationId)).limit(1);
-            const route = await findShortestRoute(run.cityId, body.sourceIntersectionId!, body.destinationIntersectionId!);
+        if ((hasSource !== hasDestination) || (body.routes && (hasSource || hasDestination))) {
+            return NextResponse.json({ error: "Provide either a routes array or one source and destination pair" }, { status: 400 });
+        }
+        const manualRoutes = body.routes ?? (hasSource && hasDestination ? [{
+            sourceIntersectionId: body.sourceIntersectionId!,
+            destinationIntersectionId: body.destinationIntersectionId!,
+        }] : undefined);
+        if (manualRoutes && (manualRoutes.length === 0 || manualRoutes.length > 25 || manualRoutes.some((route) =>
+            !Number.isInteger(route.sourceIntersectionId) || route.sourceIntersectionId <= 0 ||
+            !Number.isInteger(route.destinationIntersectionId) || route.destinationIntersectionId <= 0 ||
+            route.sourceIntersectionId === route.destinationIntersectionId
+        ))) {
+            return NextResponse.json({ error: "routes must contain 1–25 pairs of different valid intersection IDs" }, { status: 400 });
+        }
+        if (manualRoutes) {
+            for (const endpoints of manualRoutes) {
+                const route = await findShortestRoute(simulation[0].cityId, endpoints.sourceIntersectionId, endpoints.destinationIntersectionId);
             if (!route || route.segments.length === 0) {
-                return NextResponse.json({ error: "No drivable route exists between these intersections" }, { status: 422 });
+                    return NextResponse.json({ error: `No drivable route exists from intersection ${endpoints.sourceIntersectionId} to ${endpoints.destinationIntersectionId}` }, { status: 422 });
+                }
             }
         }
 
@@ -98,10 +110,7 @@ export async function POST(
             await generateVehicles(
                 simulationId,
                 count,
-                hasSource ? {
-                    sourceIntersectionId: body.sourceIntersectionId!,
-                    destinationIntersectionId: body.destinationIntersectionId!,
-                } : undefined,
+                manualRoutes,
             );
 
         if (simulationEngine.isRunning(simulationId)) {

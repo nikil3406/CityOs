@@ -10,6 +10,7 @@ import SimulationEvents from "@/components/simulation/SimulationEvents";
 type Run = { id: number; cityId: number; status: string; simulationTime: number; createdAt: string };
 type Light = { id: number; intersectionId: number; intersectionName: string | null; currentPhase: number; cycleDuration: number; phaseElapsed: number; status: string; phases: { phaseNumber: number; durationSeconds: number; state: string }[]; movements: { phaseNumber: number; fromRoadId: number; toRoadId: number; state: string }[] };
 type Congestion = { congestionLevel: string; queueVehicleCount: number };
+type ManualRoute = { sourceIntersectionId: number; destinationIntersectionId: number; distanceMeters: number };
 
 const initialLayers: VisibleLayers = { roads: true, intersections: true, buildings: false, trees: false, waterways: false, contours: false };
 const panel = "rounded-2xl border border-slate-200 bg-white shadow-[0_10px_30px_-24px_rgba(15,23,42,.35)]";
@@ -24,6 +25,7 @@ export default function DashboardPage() {
     const [routeCoordinates, setRouteCoordinates] = useState<[number, number][]>([]);
     const [sourceId, setSourceId] = useState<number | null>(null);
     const [destinationId, setDestinationId] = useState<number | null>(null);
+    const [manualRoutes, setManualRoutes] = useState<ManualRoute[]>([]);
     const [selectionTarget, setSelectionTarget] = useState<"source" | "destination">("source");
     const [showEndpointMarkers, setShowEndpointMarkers] = useState(true);
     const [showRouteLine, setShowRouteLine] = useState(true);
@@ -38,7 +40,8 @@ export default function DashboardPage() {
 
     const { cities, roads, intersections, buildings, trees, waterAreas, waterLines, contours, boundary, loading: mapLoading, error: mapError } = useCityMapData(cityId);
     const selectedRun = runs.find((run) => run.id === runId) ?? null;
-    const { metrics, loading: metricsLoading, error: metricsError } = useSimulationMetrics(runId);
+    const hasRunningRuns = runs.some((run) => run.status === "RUNNING");
+    const { metrics, loading: metricsLoading, error: metricsError } = useSimulationMetrics(runId, selectedRun?.status === "RUNNING");
     const selectedLight = lights.find((light) => light.id === lightId) ?? null;
     const signalIndicators = useMemo(() => lights.map((light) => ({ intersectionId: light.intersectionId, state: light.phases.find((phase) => phase.phaseNumber === light.currentPhase)?.state ?? light.status })), [lights]);
     const congestedRoads = congestion.filter((segment) => segment.congestionLevel === "CONGESTED" || segment.congestionLevel === "SEVERE").length;
@@ -51,12 +54,17 @@ export default function DashboardPage() {
             if (!response.ok) throw new Error("Could not load simulations");
             const data: Run[] = await response.json();
             setRuns(data);
-            setRunId((current) => current && data.some((run) => run.id === current) ? current : data.find((run) => run.cityId === cityId)?.id ?? null);
+            setRunId((current) => current && data.some((run) => run.id === current && run.cityId === cityId) ? current : null);
         } catch (error) { setNotice(error instanceof Error ? error.message : "Could not load simulations"); }
     }, [cityId]);
 
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    useEffect(() => { void refreshRuns(); const timer = setInterval(() => void refreshRuns(), 3000); return () => clearInterval(timer); }, [refreshRuns]);
+    useEffect(() => {
+        void refreshRuns();
+        if (!hasRunningRuns) return;
+        const timer = setInterval(() => void refreshRuns(), 3000);
+        return () => clearInterval(timer);
+    }, [refreshRuns, hasRunningRuns]);
     useEffect(() => {
         let active = true;
         const loadSignals = async () => {
@@ -72,9 +80,10 @@ export default function DashboardPage() {
             } catch { if (active) setNotice("Could not load signal data"); }
         };
         void loadSignals();
+        if (!hasRunningRuns) return () => { active = false; };
         const timer = setInterval(() => void loadSignals(), 2000);
         return () => { active = false; clearInterval(timer); };
-    }, [cityId]);
+    }, [cityId, hasRunningRuns]);
     useEffect(() => {
         if (!runId) return;
         let active = true;
@@ -86,9 +95,11 @@ export default function DashboardPage() {
                 if (active) setCongestion(Array.isArray(data.congestion) ? data.congestion : []);
             } catch { if (active) setCongestion([]); }
         };
-        void load(); const timer = setInterval(() => void load(), 3000);
+        void load();
+        if (selectedRun?.status !== "RUNNING") return () => { active = false; };
+        const timer = setInterval(() => void load(), 3000);
         return () => { active = false; clearInterval(timer); };
-    }, [runId]);
+    }, [runId, selectedRun?.status]);
     useEffect(() => {
         if (!runId) return;
         let active = true;
@@ -100,9 +111,11 @@ export default function DashboardPage() {
                 if (active) setVehicleCountSnapshot({ runId, count: Array.isArray(data) ? data.length : 0 });
             } catch { /* Keep the latest successful count visible. */ }
         };
-        void loadCount(); const timer = setInterval(() => void loadCount(), 3000);
+        void loadCount();
+        if (selectedRun?.status !== "RUNNING") return () => { active = false; };
+        const timer = setInterval(() => void loadCount(), 3000);
         return () => { active = false; clearInterval(timer); };
-    }, [runId]);
+    }, [runId, selectedRun?.status]);
 
     const runAction = async (action: "start" | "pause" | "stop") => {
         if (!runId) return;
@@ -129,13 +142,36 @@ export default function DashboardPage() {
         catch (error) { setRouteIds([]); setRouteCoordinates([]); setRouteDistance(null); setNotice(error instanceof Error ? error.message : "Route lookup failed"); return false; }
     };
 
+    const addManualRoute = () => {
+        if (sourceId === null || destinationId === null || routeDistance === null) {
+            setNotice("Preview a valid route before adding it to the vehicle plan.");
+            return;
+        }
+        if (manualRoutes.some((route) => route.sourceIntersectionId === sourceId && route.destinationIntersectionId === destinationId)) {
+            setNotice("That source and destination pair is already in the route list.");
+            return;
+        }
+        if (manualRoutes.length >= 25) {
+            setNotice("You can add up to 25 routes per vehicle generation batch.");
+            return;
+        }
+        setManualRoutes((current) => [...current, { sourceIntersectionId: sourceId, destinationIntersectionId: destinationId, distanceMeters: routeDistance }]);
+        setNotice(`Added route #${sourceId} → #${destinationId}.`);
+        setSourceId(null);
+        setDestinationId(null);
+        setRouteIds([]);
+        setRouteCoordinates([]);
+        setRouteDistance(null);
+        setSelectionTarget("source");
+    };
+
     const generate = async () => {
         if (!runId) { setNotice("Create or select a simulation first."); return; }
         if (!selectedRun || !["CREATED", "RUNNING", "PAUSED"].includes(selectedRun.status)) { setNotice("Vehicles can only be added to a created, running, or paused simulation."); return; }
-        if (mode === "manual" && (!sourceId || !destinationId || sourceId === destinationId)) { setNotice("Choose different source and destination intersections."); return; }
+        if (mode === "manual" && manualRoutes.length === 0) { setNotice("Preview and add at least one source-to-destination route first."); return; }
         setBusy(true); setNotice("");
-        try { if (mode === "manual" && !(await previewRoute())) return;
-            const response = await fetch(`/api/simulation/runs/${runId}/vehicles`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ count, ...(mode === "manual" ? { sourceIntersectionId: sourceId, destinationIntersectionId: destinationId } : {}) }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error ?? "Vehicle generation failed"); setNotice(`Generated ${data.count} vehicles for simulation #${runId}.${selectedRun.status === "RUNNING" ? " They should now be moving on the map." : " They are visible on the map but stationary; click Start or Resume to move them."}`);
+        try {
+            const response = await fetch(`/api/simulation/runs/${runId}/vehicles`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ count, ...(mode === "manual" ? { routes: manualRoutes.map(({ sourceIntersectionId, destinationIntersectionId }) => ({ sourceIntersectionId, destinationIntersectionId })) } : {}) }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error ?? "Vehicle generation failed"); setVehicleCountSnapshot((current) => ({ runId, count: (current?.runId === runId ? current.count : 0) + Number(data.count ?? 0) })); setNotice(`Generated ${data.count} vehicles for simulation #${runId}.${mode === "manual" ? ` Distributed across ${manualRoutes.length} selected routes.` : ""}${selectedRun.status === "RUNNING" ? " They should now be moving on the map." : " They are visible on the map but stationary; click Start or Resume to move them."}`);
         } catch (error) { setNotice(error instanceof Error ? error.message : "Vehicle generation failed"); } finally { setBusy(false); }
     };
 
@@ -151,7 +187,7 @@ export default function DashboardPage() {
         <header className="sticky top-0 z-[1100] border-b border-slate-200 bg-white/95 backdrop-blur">
             <div className="mx-auto flex max-w-[1800px] flex-wrap items-center justify-between gap-4 px-5 py-3 lg:px-8">
                 <div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-lg font-black text-white">C</div><div><div className="font-bold tracking-tight">CityOS <span className="font-medium text-slate-400">/ Control Center</span></div><div className="text-xs text-slate-500">Urban mobility simulation workspace</div></div></div>
-                <div className="flex flex-wrap items-center gap-3 text-sm"><a href="/map" className="rounded-lg px-3 py-2 font-medium text-slate-600 hover:bg-slate-100">Map</a><div className="h-7 border-l border-slate-200"/><select aria-label="Selected city" value={cityId} onChange={(e) => { setCityId(Number(e.target.value)); setRunId(null); setRouteIds([]); setRouteCoordinates([]); setSourceId(null); setDestinationId(null); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2">{cities.map((city) => <option key={city.id} value={city.id}>{city.name}, {city.country}</option>)}</select><span className={`rounded-full px-3 py-1.5 text-xs font-bold ${selectedRun?.status === "RUNNING" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{selectedRun?.status ?? "NO RUN"}</span><span className="text-slate-500">{selectedRun ? `Run #${selectedRun.id} · T+${selectedRun.simulationTime}s` : cityName}</span></div>
+                <div className="flex flex-wrap items-center gap-3 text-sm"><a href="/map" className="rounded-lg px-3 py-2 font-medium text-slate-600 hover:bg-slate-100">Map</a><div className="h-7 border-l border-slate-200"/><select aria-label="Selected city" value={cityId} onChange={(e) => { setCityId(Number(e.target.value)); setRunId(null); setRouteIds([]); setRouteCoordinates([]); setSourceId(null); setDestinationId(null); setManualRoutes([]); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2">{cities.map((city) => <option key={city.id} value={city.id}>{city.name}, {city.country}</option>)}</select><span className={`rounded-full px-3 py-1.5 text-xs font-bold ${selectedRun?.status === "RUNNING" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{selectedRun?.status ?? "NO RUN"}</span><span className="text-slate-500">{selectedRun ? `Run #${selectedRun.id} · T+${selectedRun.simulationTime}s` : cityName}</span></div>
             </div>
         </header>
         <div className="mx-auto max-w-[1800px] space-y-5 p-4 lg:p-7">
@@ -159,7 +195,7 @@ export default function DashboardPage() {
             <div className="grid gap-5 xl:grid-cols-[minmax(0,1.65fr)_minmax(370px,.85fr)]">
                 <section className={`${panel} overflow-hidden`}>
                     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-4"><div><h1 className="font-semibold">Live network map</h1><p className="mt-0.5 text-xs text-slate-500">{mode === "manual" ? `Click an intersection to set the ${selectionTarget}.` : `${cityName} · live traffic and infrastructure`}</p></div><div className="flex flex-wrap gap-3 text-xs text-slate-500">{Object.entries(layers).map(([key, value]) => <label className="flex items-center gap-1.5" key={key}><input type="checkbox" checked={value} onChange={(e) => setLayers((current) => ({ ...current, [key]: e.target.checked }))}/>{key[0].toUpperCase() + key.slice(1)}</label>)}<span className="mx-1 hidden border-l border-slate-200 sm:inline"/><label className="flex items-center gap-1.5"><input type="checkbox" checked={showEndpointMarkers} onChange={(event) => setShowEndpointMarkers(event.target.checked)}/>Endpoint markers</label><label className="flex items-center gap-1.5"><input type="checkbox" checked={showRouteLine} onChange={(event) => setShowRouteLine(event.target.checked)}/>Shortest route</label></div></div>
-                    <div className="h-[470px] lg:h-[610px]"><CityMapClient selectedCityId={cityId} setSelectedCityId={(id) => { setCityId(id); setRouteIds([]); setRouteCoordinates([]); setSourceId(null); setDestinationId(null); }} selectedSimulationId={runId} visibleLayers={layers} cities={cities} roads={roads} intersections={intersections} buildings={buildings} trees={trees} waterAreas={waterAreas} waterLines={waterLines} contours={contours} boundary={boundary} loading={mapLoading} error={mapError} routeIntersectionIds={showRouteLine ? routeIds : []} routeCoordinates={showRouteLine ? routeCoordinates : []} sourceIntersectionId={showEndpointMarkers ? sourceId : null} destinationIntersectionId={showEndpointMarkers ? destinationId : null} signalIndicators={signalIndicators} onIntersectionSelect={(id) => { if (mode === "manual") { if (selectionTarget === "source") { setSourceId(id); setSelectionTarget("destination"); } else { setDestinationId(id); } setRouteIds([]); setRouteCoordinates([]); setRouteDistance(null); } }}/></div>
+                    <div className="h-[470px] lg:h-[610px]"><CityMapClient selectedCityId={cityId} setSelectedCityId={(id) => { setCityId(id); setRouteIds([]); setRouteCoordinates([]); setSourceId(null); setDestinationId(null); setManualRoutes([]); }} selectedSimulationId={runId} simulationStatus={selectedRun?.status ?? null} visibleLayers={layers} cities={cities} roads={roads} intersections={intersections} buildings={buildings} trees={trees} waterAreas={waterAreas} waterLines={waterLines} contours={contours} boundary={boundary} loading={mapLoading} error={mapError} routeIntersectionIds={showRouteLine ? routeIds : []} routeCoordinates={showRouteLine ? routeCoordinates : []} sourceIntersectionId={showEndpointMarkers ? sourceId : null} destinationIntersectionId={showEndpointMarkers ? destinationId : null} signalIndicators={signalIndicators} onIntersectionSelect={(id) => { if (mode === "manual") { if (selectionTarget === "source") { setSourceId(id); setSelectionTarget("destination"); } else { setDestinationId(id); } setRouteIds([]); setRouteCoordinates([]); setRouteDistance(null); } }}/></div>
                     <div className="flex flex-wrap items-center gap-4 border-t border-slate-100 px-5 py-3 text-xs text-slate-500">{showEndpointMarkers && <><span><i className="mr-1 inline-block h-2.5 w-2.5 rounded-full bg-green-600"/>Source</span><span><i className="mr-1 inline-block h-2.5 w-2.5 rounded-full bg-red-600"/>Destination</span></>}{showRouteLine && <span className="text-orange-600">Dashed line · shortest route{routeDistance !== null ? ` · ${(routeDistance / 1000).toFixed(2)} km` : ""}</span>}<span className="ml-auto">{roadsCount} roads · {intersections.length} intersections</span></div>
                     {selectedRun && visibleVehicleCount === 0 && <p className="border-t border-amber-100 bg-amber-50 px-5 py-3 text-sm text-amber-900">No vehicles are attached to run #{selectedRun.id} yet. Generate vehicles in the panel below, then Start or Resume the run to move them.</p>}
                 </section>
@@ -170,7 +206,7 @@ export default function DashboardPage() {
                     </section>
                     <section className={`${panel} p-5`}><div className="flex items-center justify-between"><div><h2 className="font-semibold">Vehicle generation</h2><p className="mt-1 text-xs text-slate-500">Real route plans on the city road network</p></div></div><div className="mt-4 flex rounded-lg bg-slate-100 p-1"><button onClick={() => setMode("automatic")} className={`flex-1 rounded-md py-2 text-xs font-semibold ${mode === "automatic" ? "bg-white shadow-sm" : "text-slate-500"}`}>Automatic</button><button onClick={() => setMode("manual")} className={`flex-1 rounded-md py-2 text-xs font-semibold ${mode === "manual" ? "bg-white shadow-sm" : "text-slate-500"}`}>Source & destination</button></div>
                         <label className="mt-4 block text-xs font-medium text-slate-600">Vehicles <input type="number" min={1} max={1000} value={count} onChange={(e) => setCount(Math.min(1000, Math.max(1, Number(e.target.value))))} className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm"/></label>
-                        {mode === "manual" && <><div className="mt-3 text-xs font-medium text-slate-600">Choose which endpoint the next map click sets</div><div className="mt-2 grid grid-cols-2 gap-2"><button type="button" onClick={() => setSelectionTarget("source")} className={`rounded-lg border px-3 py-2 text-xs font-semibold ${selectionTarget === "source" ? "border-green-300 bg-green-50 text-green-800" : "border-slate-200 text-slate-500"}`}>Source{sourceId ? ` · #${sourceId}` : ""}</button><button type="button" onClick={() => setSelectionTarget("destination")} className={`rounded-lg border px-3 py-2 text-xs font-semibold ${selectionTarget === "destination" ? "border-red-300 bg-red-50 text-red-800" : "border-slate-200 text-slate-500"}`}>Destination{destinationId ? ` · #${destinationId}` : ""}</button></div><div className="mt-3 grid grid-cols-2 gap-2">{([sourceId, destinationId] as const).map((value, index) => <label key={index} className="text-xs font-medium text-slate-600">{index === 0 ? "Source" : "Destination"}<select value={value ?? ""} onChange={(e) => { const id = e.target.value ? Number(e.target.value) : null; if (index === 0) { setSourceId(id); setSelectionTarget("destination"); } else { setDestinationId(id); setSelectionTarget("source"); } setRouteIds([]); setRouteCoordinates([]); setRouteDistance(null); }} className="mt-1.5 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2.5 text-xs"><option value="">Select intersection</option>{intersections.map((item) => <option key={item.id} value={item.id}>#{item.id} {item.name ?? "Intersection"}</option>)}</select></label>)}</div><button onClick={() => void previewRoute()} disabled={!sourceId || !destinationId} className="mt-3 w-full rounded-lg border border-slate-200 py-2 text-xs font-semibold disabled:opacity-40">Preview shortest route</button></>}
+                        {mode === "manual" && <><div className="mt-3 text-xs font-medium text-slate-600">Choose which endpoint the next map click sets</div><div className="mt-2 grid grid-cols-2 gap-2"><button type="button" onClick={() => setSelectionTarget("source")} className={`rounded-lg border px-3 py-2 text-xs font-semibold ${selectionTarget === "source" ? "border-green-300 bg-green-50 text-green-800" : "border-slate-200 text-slate-500"}`}>Source{sourceId ? ` · #${sourceId}` : ""}</button><button type="button" onClick={() => setSelectionTarget("destination")} className={`rounded-lg border px-3 py-2 text-xs font-semibold ${selectionTarget === "destination" ? "border-red-300 bg-red-50 text-red-800" : "border-slate-200 text-slate-500"}`}>Destination{destinationId ? ` · #${destinationId}` : ""}</button></div><div className="mt-3 grid grid-cols-2 gap-2">{([sourceId, destinationId] as const).map((value, index) => <label key={index} className="text-xs font-medium text-slate-600">{index === 0 ? "Source" : "Destination"}<select value={value ?? ""} onChange={(e) => { const id = e.target.value ? Number(e.target.value) : null; if (index === 0) { setSourceId(id); setSelectionTarget("destination"); } else { setDestinationId(id); setSelectionTarget("source"); } setRouteIds([]); setRouteCoordinates([]); setRouteDistance(null); }} className="mt-1.5 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2.5 text-xs"><option value="">Select intersection</option>{intersections.map((item) => <option key={item.id} value={item.id}>#{item.id} {item.name ?? "Intersection"}</option>)}</select></label>)}</div><div className="mt-3 grid grid-cols-2 gap-2"><button onClick={() => void previewRoute()} disabled={!sourceId || !destinationId} className="rounded-lg border border-slate-200 py-2 text-xs font-semibold disabled:opacity-40">Preview shortest route</button><button onClick={addManualRoute} disabled={routeDistance === null || !sourceId || !destinationId || manualRoutes.length >= 25} className="rounded-lg bg-blue-700 py-2 text-xs font-semibold text-white disabled:opacity-40">Add route</button></div><div className="mt-3 rounded-lg bg-slate-50 p-3"><div className="flex items-center justify-between text-xs font-semibold text-slate-700"><span>Routes in this batch</span><span>{manualRoutes.length}/25</span></div>{manualRoutes.length === 0 ? <p className="mt-2 text-xs text-slate-500">Preview a route and add it here. Vehicles will be distributed across the listed routes.</p> : <ul className="mt-2 space-y-1.5">{manualRoutes.map((route, index) => <li key={`${route.sourceIntersectionId}-${route.destinationIntersectionId}`} className="flex items-center justify-between gap-2 rounded-md bg-white px-2 py-1.5 text-xs"><span>Route {index + 1}: #{route.sourceIntersectionId} → #{route.destinationIntersectionId} · {(route.distanceMeters / 1000).toFixed(2)} km</span><button type="button" aria-label={`Clear route ${index + 1}`} title={`Clear route ${index + 1}`} onClick={() => setManualRoutes((current) => current.filter((_, routeIndex) => routeIndex !== index))} className="rounded border border-red-200 px-2 py-1 font-semibold text-red-600 hover:bg-red-50">Clear</button></li>)}</ul>}</div></>}
                         <button disabled={busy || !canGenerate} onClick={() => void generate()} className="mt-3 w-full rounded-lg bg-slate-900 px-3 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300">{busy ? "Working…" : "Generate vehicles"}</button></section>
                     <section className={`${panel} p-5`}><div className="flex items-start justify-between gap-2"><div><h2 className="font-semibold">Traffic signals</h2><p className="mt-1 text-xs text-slate-500">Inspect configured phases by intersection</p></div><select aria-label="Traffic light" value={lightId ?? ""} onChange={(e) => setLightId(e.target.value ? Number(e.target.value) : null)} className="max-w-[180px] rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs">{lights.length === 0 && <option value="">No signals</option>}{lights.map((light) => <option key={light.id} value={light.id}>#{light.intersectionId} {light.intersectionName ?? "Signal"}</option>)}</select></div>
                         {selectedLight ? <><div className="mt-3 flex items-center justify-between text-xs"><span className="text-slate-500">Signal #{selectedLight.id} · {selectedLight.status}</span><span className="font-semibold">Phase {selectedLight.currentPhase} · {selectedLight.phaseElapsed}/{selectedLight.cycleDuration}s</span></div><div className="mt-3 grid grid-cols-3 gap-2">{selectedLight.phases.length ? selectedLight.phases.map((phase) => <div key={phase.phaseNumber} className={`rounded-lg p-2 text-center ${phase.phaseNumber === selectedLight.currentPhase ? "bg-blue-50 ring-1 ring-blue-200" : "bg-slate-50"}`}><div className="text-[10px] uppercase text-slate-500">Phase {phase.phaseNumber}</div><div className="mt-0.5 text-xs font-bold">{phase.state}</div><div className="text-[10px] text-slate-500">{phase.durationSeconds}s</div></div>) : <p className="col-span-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">No phase configuration exists yet.</p>}</div><p className="mt-2 text-[11px] text-slate-500">{selectedLight.movements.length} movement state records · runtime state is managed by the simulation engine</p><button onClick={() => void configureLight()} disabled={busy} className="mt-3 w-full rounded-lg border border-slate-200 py-2 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50">Generate / replace signal plan…</button></> : <p className="mt-4 text-sm text-slate-500">No traffic lights are registered for this city.</p>}</section>
@@ -178,7 +214,7 @@ export default function DashboardPage() {
             </div>
             <section className={`${panel} p-5`}><div className="mb-4 flex items-center justify-between"><div><h2 className="font-semibold">Live monitoring</h2><p className="mt-1 text-xs text-slate-500">Metrics are sourced from the selected simulation run</p></div><span className="text-xs text-slate-500">{selectedRun?.status ?? "Select a run"} · T+{selectedRun?.simulationTime ?? 0}s</span></div>{metricsError && <p className="mb-3 text-sm text-red-600">{metricsError}</p>}<div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">{[["Total vehicles", metrics?.totalVehicles], ["Active vehicles", metrics?.activeVehicles], ["Waiting at signals", metrics?.signalWaitingVehicles], ["Active queues", metrics?.activeQueues], ["Max queue", metrics?.maximumQueueVehicles], ["Mean speed", metrics ? `${metrics.averageSpeedKmh.toFixed(1)} km/h` : null]].map(([label, value]) => <div key={String(label)} className="rounded-xl bg-slate-50 p-4"><div className="text-xs text-slate-500">{label}</div><div className="mt-2 text-2xl font-semibold tracking-tight">{value ?? (metricsLoading ? "…" : "—")}</div></div>)}</div>{!runId && <p className="mt-3 text-sm text-slate-500">Create or select a run to view metrics and events.</p>}</section>
             {runId && <div className={`${panel} px-5 py-3 text-sm text-slate-600`}>Road congestion: <strong className="text-slate-900">{congestedRoads}</strong> congested or severe segments out of {congestion.length} measured segments.</div>}
-            {runId && <SimulationEvents simulationId={runId}/>}
+            {runId && <SimulationEvents simulationId={runId} isRunning={selectedRun?.status === "RUNNING"}/>}
             {!mapLoading && <div className="text-xs text-slate-400">Network inventory · {roadsCount} drivable roads · {intersections.length} intersections · {buildings.length} buildings · {trees.length} trees · {waterAreas.length + waterLines.length} waterways · {contours.length} contour lines</div>}
         </div>
     </main>;

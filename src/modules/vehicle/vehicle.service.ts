@@ -38,6 +38,11 @@ type VehiclePlan = {
     geometry: unknown;
 };
 
+export type VehicleRouteEndpoints = {
+    sourceIntersectionId: number;
+    destinationIntersectionId: number;
+};
+
 /**
  * Generate exactly `count` vehicles, or fail before inserting any vehicles if
  * the city's available road network cannot provide enough valid routes.
@@ -48,7 +53,7 @@ type VehiclePlan = {
 export async function generateVehicles(
     simulationRunId: number,
     count: number,
-    endpoints?: { sourceIntersectionId: number; destinationIntersectionId: number },
+    endpoints?: VehicleRouteEndpoints | VehicleRouteEndpoints[],
 ): Promise<GeneratedVehicle[]> {
     if (!Number.isInteger(count) || count <= 0) {
         throw new Error("Vehicle count must be a positive integer");
@@ -69,10 +74,15 @@ export async function generateVehicles(
         (simulationResult[0] as { cityId: number | string }).cityId,
     );
 
-    if (endpoints && (endpoints.sourceIntersectionId === endpoints.destinationIntersectionId ||
-        !Number.isInteger(endpoints.sourceIntersectionId) || !Number.isInteger(endpoints.destinationIntersectionId))) {
-        throw new Error("Source and destination must be different valid intersections");
-    }
+    const manualRoutes = endpoints
+        ? Array.isArray(endpoints) ? endpoints : [endpoints]
+        : null;
+    if (manualRoutes?.some((route) =>
+        !Number.isInteger(route.sourceIntersectionId) ||
+        !Number.isInteger(route.destinationIntersectionId) ||
+        route.sourceIntersectionId <= 0 || route.destinationIntersectionId <= 0 ||
+        route.sourceIntersectionId === route.destinationIntersectionId
+    )) throw new Error("Each route needs two different valid intersections");
 
     const segmentResult = await db.execute(sql`
         SELECT
@@ -100,14 +110,14 @@ export async function generateVehicles(
             startIntersectionId: Number(segment.startIntersectionId),
             endIntersectionId: Number(segment.endIntersectionId),
         }),
-    ).filter((segment) => !endpoints ||
-        segment.startIntersectionId === endpoints.sourceIntersectionId ||
-        segment.endIntersectionId === endpoints.sourceIntersectionId);
+    ).filter((segment) => !manualRoutes || manualRoutes.some((route) =>
+        segment.startIntersectionId === route.sourceIntersectionId ||
+        segment.endIntersectionId === route.sourceIntersectionId));
 
     // Manual mode creates the requested fleet on one selected route. Reuse
     // source-connected candidates so vehicle count is not capped by the source
     // intersection's number of adjacent road segments.
-    if (endpoints && candidates.length > 0) {
+    if (manualRoutes && candidates.length > 0) {
         const sourceCandidates = [...candidates];
         while (candidates.length < count) {
             candidates.push(
@@ -121,13 +131,27 @@ export async function generateVehicles(
     }
 
     const reachableByStart = new Map<number, number[]>();
+    const manualPlansByRoute = new Map<string, VehiclePlan>();
     const plans: VehiclePlan[] = [];
 
     // Try candidates until enough valid route plans are found.
     for (const candidate of candidates) {
         if (plans.length >= count) break;
 
-        const startIntersectionId = endpoints?.sourceIntersectionId ?? candidate.startIntersectionId;
+        const selectedRoute = manualRoutes
+            ? manualRoutes[plans.length % manualRoutes.length]
+            : null;
+        const selectedRouteKey = selectedRoute
+            ? `${selectedRoute.sourceIntersectionId}:${selectedRoute.destinationIntersectionId}`
+            : null;
+        const existingManualPlan = selectedRouteKey
+            ? manualPlansByRoute.get(selectedRouteKey)
+            : undefined;
+        if (existingManualPlan) {
+            plans.push(existingManualPlan);
+            continue;
+        }
+        const startIntersectionId = selectedRoute?.sourceIntersectionId ?? candidate.startIntersectionId;
         let reachable = reachableByStart.get(startIntersectionId);
 
         if (!reachable) {
@@ -138,7 +162,7 @@ export async function generateVehicles(
             reachableByStart.set(startIntersectionId, reachable);
         }
 
-        const destinations = (endpoints ? [endpoints.destinationIntersectionId] : reachable).filter(
+        const destinations = (selectedRoute ? [selectedRoute.destinationIntersectionId] : reachable).filter(
             (intersectionId) => intersectionId !== startIntersectionId,
         );
         if (destinations.length === 0) continue;
@@ -224,7 +248,10 @@ export async function generateVehicles(
             break;
         }
 
-        if (planForCandidate) plans.push(planForCandidate);
+        if (planForCandidate) {
+            plans.push(planForCandidate);
+            if (selectedRouteKey) manualPlansByRoute.set(selectedRouteKey, planForCandidate);
+        }
     }
 
     if (plans.length < count) {

@@ -44,6 +44,7 @@ import type {
 type CityMapProps = {
     selectedCityId: number;
     selectedSimulationId: number | null;
+    simulationStatus: string | null;
     setSelectedCityId: (
         id: number,
     ) => void;
@@ -70,6 +71,7 @@ type CityMapProps = {
 export default function CityMap({
     selectedCityId,
     selectedSimulationId,
+    simulationStatus,
     setSelectedCityId,
     visibleLayers,
     cities,
@@ -98,6 +100,7 @@ export default function CityMap({
     const simulationVehicles =
         useSimulationVehicles(
             selectedSimulationId,
+            simulationStatus,
         );
 
     const [
@@ -392,6 +395,7 @@ export default function CityMap({
                 zoom={10}
                 zoomSnap={0.5}
                 zoomDelta={0.5}
+                scrollWheelZoom={false}
                 rotate={true}
                 bearing={77}
                 dragRotate={false}
@@ -401,7 +405,7 @@ export default function CityMap({
                     height: "100%",
                     width: "100%",
                 }}
-                maxBoundsViscosity={1.0}
+                maxBoundsViscosity={0.2}
             >
                 <TileLayer
                     attribution="&copy; OpenStreetMap contributors"

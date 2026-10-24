@@ -53,8 +53,9 @@ export default function MapBounds({
         // prevent further zooming out.
         map.setMinZoom(defaultZoom);
 
-        // Prevent panning outside the city area.
-        map.setMaxBounds(bounds);
+        // Leave room to pan around the city, including its lower and edge
+        // areas, without Leaflet snapping the view back at the exact boundary.
+        map.setMaxBounds(bounds.pad(0.75));
     }, [map, boundary]);
 
     return null;

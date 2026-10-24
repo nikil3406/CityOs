@@ -7,6 +7,7 @@ import type { SimulationVehicle } from "../types/map.types";
 
 export function useSimulationVehicles(
     simulationId: number | null,
+    simulationStatus: string | null,
 ) {
     const [snapshot, setSnapshot] = useState<{
         simulationId: number;
@@ -19,39 +20,10 @@ export function useSimulationVehicles(
         }
 
         let cancelled = false;
-        let interval: ReturnType<
-            typeof setInterval
-        > | null = null;
+        let interval: ReturnType<typeof setInterval> | null = null;
 
         async function fetchVehicles() {
             try {
-                /*
-                 * First check the simulation status.
-                 */
-                const simulationResponse =
-                    await fetch(
-                        `/api/simulation/runs/${simulationId}`,
-                        {
-                            cache: "no-store",
-                        },
-                    );
-
-                if (!simulationResponse.ok) {
-                    throw new Error(
-                        `Failed to fetch simulation: ${simulationResponse.status}`,
-                    );
-                }
-
-                const simulation =
-                    await simulationResponse.json();
-
-                console.log(
-                    `Simulation ${simulationId} status:`,
-                    simulation.status,
-                );
-
-                // Keep generated vehicles visible while CREATED or PAUSED too.
-                // Their positions stay fixed until the engine is running.
                 const response =
                     await fetch(
                         `/api/simulation/runs/${simulationId}/vehicles`,
@@ -108,10 +80,9 @@ export function useSimulationVehicles(
         /*
          * Poll while simulation is active.
          */
-        interval = setInterval(
-            fetchVehicles,
-            SimulationConfig.tickIntervalMs,
-        );
+        if (simulationStatus === "RUNNING") {
+            interval = setInterval(fetchVehicles, SimulationConfig.tickIntervalMs);
+        }
 
         return () => {
             cancelled = true;
@@ -120,7 +91,7 @@ export function useSimulationVehicles(
                 clearInterval(interval);
             }
         };
-    }, [simulationId]);
+    }, [simulationId, simulationStatus]);
 
     return snapshot?.simulationId === simulationId ? snapshot.vehicles : [];
 }

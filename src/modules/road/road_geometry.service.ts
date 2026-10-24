@@ -214,6 +214,73 @@ export async function getSegmentBearing(
     );
 }
 
+/**
+ * Classify every road-to-road movement that can physically enter and leave
+ * an intersection. Road segments are traversable in either direction in the
+ * simulation, so each connected segment contributes an incoming and outgoing
+ * traversal regardless of the stored geometry orientation.
+ */
+export async function classifyAllIntersectionMovements(
+    connectedSegments: {
+        id: number;
+        roadId: number;
+        startIntersectionId: number;
+        endIntersectionId: number;
+    }[],
+    intersectionId: number,
+): Promise<IntersectionMovement[]> {
+    const incoming: {
+        segment: (typeof connectedSegments)[number];
+        bearing: number;
+    }[] = [];
+    const outgoing: {
+        segment: (typeof connectedSegments)[number];
+        bearing: number;
+    }[] = [];
+
+    for (const segment of connectedSegments) {
+        if (segment.endIntersectionId === intersectionId) {
+            const bearing = await getSegmentBearing(segment.id, false, true);
+            if (bearing !== null) incoming.push({ segment, bearing });
+        }
+        if (segment.startIntersectionId === intersectionId) {
+            const bearing = await getSegmentBearing(segment.id, true, false);
+            if (bearing !== null) incoming.push({ segment, bearing });
+        }
+
+        if (segment.startIntersectionId === intersectionId) {
+            const bearing = await getSegmentBearing(segment.id, false, false);
+            if (bearing !== null) outgoing.push({ segment, bearing });
+        }
+        if (segment.endIntersectionId === intersectionId) {
+            const bearing = await getSegmentBearing(segment.id, true, true);
+            if (bearing !== null) outgoing.push({ segment, bearing });
+        }
+    }
+
+    const movementsByRoadPair = new Map<string, IntersectionMovement>();
+
+    for (const from of incoming) {
+        for (const to of outgoing) {
+            const key = `${from.segment.roadId}:${to.segment.roadId}`;
+            if (movementsByRoadPair.has(key)) continue;
+
+            movementsByRoadPair.set(key, {
+                incomingSegmentId: from.segment.id,
+                outgoingSegmentId: to.segment.id,
+                incomingRoadId: from.segment.roadId,
+                outgoingRoadId: to.segment.roadId,
+                incomingBearing: from.bearing,
+                outgoingBearing: to.bearing,
+                approach: getApproachDirection(from.bearing),
+                turn: getTurnType(from.bearing, to.bearing),
+            });
+        }
+    }
+
+    return Array.from(movementsByRoadPair.values());
+}
+
 export async function getSegmentDirection(
     segmentId: number,
     reverse = false,

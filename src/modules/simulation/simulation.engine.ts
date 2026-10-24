@@ -448,6 +448,19 @@ class SimulationEngine {
             simulationId,
         );
     }
+
+    async waitForIdle(
+        simulationId: number,
+    ) {
+        while (
+            this.starting.has(simulationId) ||
+            this.activeTicks.has(simulationId)
+        ) {
+            await new Promise<void>((resolve) => {
+                setTimeout(resolve, 10);
+            });
+        }
+    }
 }
 
 

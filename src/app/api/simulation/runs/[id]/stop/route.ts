@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 
 import { db } from "@/db";
-import { simulationRuns } from "@/db/schema";
+import { simulationRuns, vehicles } from "@/db/schema";
 import { simulationEngine } from "@/modules/simulation/simulation.engine";
 
 type RouteContext = {
@@ -89,6 +89,21 @@ export async function POST(
                 updatedAt:
                     simulationRuns.updatedAt,
             });
+
+        // Let any in-flight engine tick finish before finalizing vehicle states,
+        // so it cannot overwrite COMPLETED with a movement status afterward.
+        await simulationEngine.waitForIdle(simulationId);
+
+        await db
+            .update(vehicles)
+            .set({
+                status: "COMPLETED",
+                speedKmh: 0,
+                updatedAt: new Date(),
+            })
+            .where(
+                eq(vehicles.simulationRunId, simulationId),
+            );
 
         return NextResponse.json(result[0]);
     } catch (error) {

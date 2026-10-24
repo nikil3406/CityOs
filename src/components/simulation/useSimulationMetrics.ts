@@ -24,7 +24,7 @@ type Snapshot = {
     error: string | null;
 };
 
-export function useSimulationMetrics(simulationId: number | null) {
+export function useSimulationMetrics(simulationId: number | null, isRunning: boolean) {
     const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
     const [loading, setLoading] = useState(false);
 
@@ -32,6 +32,8 @@ export function useSimulationMetrics(simulationId: number | null) {
         if (simulationId === null) return;
 
         let cancelled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let observedStatus: string | null = null;
         const fetchMetrics = async () => {
             setLoading(true);
             try {
@@ -41,6 +43,7 @@ export function useSimulationMetrics(simulationId: number | null) {
                 );
                 if (!response.ok) throw new Error("Failed to fetch simulation metrics");
                 const data = await response.json();
+                observedStatus = data.simulation.status;
                 if (!cancelled) {
                     setSnapshot({
                         simulationId,
@@ -51,6 +54,7 @@ export function useSimulationMetrics(simulationId: number | null) {
                     });
                 }
             } catch (error) {
+                observedStatus = null;
                 if (!cancelled) {
                     setSnapshot((current) => ({
                         simulationId,
@@ -77,13 +81,19 @@ export function useSimulationMetrics(simulationId: number | null) {
             }
         };
 
-        void fetchMetrics();
-        const interval = setInterval(() => void fetchMetrics(), 1000);
+        const fetchAndSchedule = async () => {
+            await fetchMetrics();
+            if (!cancelled && isRunning && observedStatus === "RUNNING") {
+                timer = setTimeout(() => void fetchAndSchedule(), 1000);
+            }
+        };
+
+        void fetchAndSchedule();
         return () => {
             cancelled = true;
-            clearInterval(interval);
+            if (timer !== null) clearTimeout(timer);
         };
-    }, [simulationId]);
+    }, [simulationId, isRunning]);
 
     const current = snapshot?.simulationId === simulationId ? snapshot : null;
     return {
