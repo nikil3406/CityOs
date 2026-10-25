@@ -28,6 +28,7 @@ import MapBounds from "./MapBounds";
 import MapMask from "./MapMask";
 import MapRotation from "./MapRotation";
 import { useSimulationVehicles } from "../hooks/useSimulationVehicles";
+import { useRecentReroutedVehicles } from "../hooks/useRecentReroutedVehicles";
 
 import type {
     Building,
@@ -104,6 +105,10 @@ export default function CityMap({
             selectedSimulationId,
             simulationStatus,
         );
+    const isRecentlyRerouted = useRecentReroutedVehicles(
+        selectedSimulationId,
+        simulationStatus,
+    );
 
     const [
         selectedRoadId,
@@ -640,6 +645,7 @@ export default function CityMap({
                         <VehicleFeature
                             key={vehicle.id}
                             vehicle={vehicle}
+                            rerouted={isRecentlyRerouted(vehicle.id)}
                         />
                     ),
                 )}

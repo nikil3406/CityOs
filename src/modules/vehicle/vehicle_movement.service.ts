@@ -56,6 +56,11 @@ type VehicleMovementRow = {
     boolean | null;
 };
 
+// A tick normally crosses only a small number of segments. This guard bounds
+// malformed zero-length/cyclic route data while retaining the unused distance
+// for the next tick when a long but valid route reaches the bound.
+const MAX_SEGMENT_TRANSITIONS_PER_TICK = 32;
+
 /*
  * Get the remaining physical distance from the vehicle
  * to the end of the current segment.
@@ -411,6 +416,18 @@ async function moveVehicle(
     let isReverse =
         vehicle.isReverse === true;
 
+    const activeRouteEntry = cache.routesByVehicle
+        .get(vehicle.id)
+        ?.get(vehicle.routeSequence);
+    if (
+        !activeRouteEntry ||
+        activeRouteEntry.segmentId !== vehicle.currentSegmentId ||
+        activeRouteEntry.isReverse !== isReverse
+    ) {
+        console.error(`Vehicle ${vehicle.id}: active route entry disagrees with vehicle state; retaining last persisted position.`);
+        return false;
+    }
+
     let currentProgress =
         Number(
             vehicle.progress,
@@ -438,6 +455,7 @@ async function moveVehicle(
         SimulationConfig.simulationSecondsPerTick;
 
     let moved = false;
+    let segmentTransitions = 0;
 
     /*
      * Re-evaluate the current segment after every
@@ -453,6 +471,17 @@ async function moveVehicle(
             Number(
                 currentSegment.lengthMeters,
             );
+
+        if (
+            !Number.isFinite(segmentLengthMeters) ||
+            segmentLengthMeters <= 0 ||
+            !Number.isFinite(currentProgress) ||
+            currentProgress < 0 || currentProgress > 1 ||
+            !Number.isFinite(remainingMovementMeters)
+        ) {
+            console.error(`Vehicle ${vehicle.id}: invalid movement state; retaining last persisted position.`);
+            return moved;
+        }
 
         const remainingSegmentDistance =
             getRemainingDistanceToIntersection(
@@ -722,6 +751,17 @@ async function moveVehicle(
             return moved;
         }
 
+        const currentExit = isReverse
+            ? currentSegment.startIntersectionId
+            : currentSegment.endIntersectionId;
+        const nextEntry = nextRoute.isReverse
+            ? nextSegment.endIntersectionId
+            : nextSegment.startIntersectionId;
+        if (currentExit !== nextEntry) {
+            console.error(`Vehicle ${vehicle.id}: disconnected route at sequence ${vehicle.routeSequence}; retaining last persisted position.`);
+            return moved;
+        }
+
         /*
          * VEHICLE REMAINS ON CURRENT SEGMENT
          */
@@ -885,6 +925,21 @@ async function moveVehicle(
          * Any leftover distance is preserved and
          * applied to the next segment.
          */
+        if (segmentTransitions >= MAX_SEGMENT_TRANSITIONS_PER_TICK) {
+            // Persist the valid entry into the current segment, then defer the
+            // remaining physical travel distance to the next simulation tick.
+            await updateVehiclePosition(
+                vehicle.id,
+                vehicle.simulationRunId,
+                currentSegment.id,
+                vehicle.routeSequence,
+                currentProgress,
+                isReverse,
+                normalSpeedKmh,
+                "MOVING",
+            );
+            return moved;
+        }
         remainingMovementMeters =
             allowedMovementMeters -
             remainingSegmentDistance;
@@ -894,6 +949,7 @@ async function moveVehicle(
 
         currentSegment =
             nextSegment;
+        segmentTransitions++;
 
         vehicle.routeSequence =
             Number(

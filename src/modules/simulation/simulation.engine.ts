@@ -11,6 +11,7 @@ import {
 import {
     moveVehicles,
 } from "@/modules/vehicle/vehicle_movement.service";
+import { applyDynamicRerouteCandidates } from "@/modules/vehicle/dynamic_rerouting.service";
 
 import {
     initializeTrafficLights,
@@ -183,6 +184,20 @@ class SimulationEngine {
                     }
 
                     const movedVehicles = await moveVehicles(simulationId);
+                    if (
+                        updated &&
+                        updated.simulationTime % SimulationConfig.dynamicRerouting.cadenceSeconds === 0
+                    ) {
+                        try {
+                            const applied = await applyDynamicRerouteCandidates(simulationId, updated.simulationTime);
+                            if (applied > 0) {
+                                console.log(`Simulation ${simulationId}: applied ${applied} dynamic reroute(s).`);
+                            }
+                        } catch (error) {
+                            // Candidate analysis is advisory and must not stop a valid simulation tick.
+                            console.error(`Simulation ${simulationId}: reroute candidate pass failed.`, error);
+                        }
+                    }
                     const queues = detectTrafficQueues(simulationId);
                     const hadQueues = getPreviousQueueState(simulationId);
                     const hasQueues = queues.length > 0;

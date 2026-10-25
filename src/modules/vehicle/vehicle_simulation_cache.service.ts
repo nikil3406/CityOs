@@ -289,3 +289,32 @@ export function getSimulationVehicleCache(
         ) ?? null
     );
 }
+
+/** Replace one cached route suffix synchronously after its DB transaction commits. */
+export function replaceCachedVehicleRouteSuffix(
+    simulationRunId: number,
+    vehicleId: number,
+    fromSequence: number,
+    replacement: CachedRoute[],
+    replacementSegments: CachedRoadSegment[],
+): boolean {
+    const cache = simulationCaches.get(simulationRunId);
+    const currentRoute = cache?.routesByVehicle.get(vehicleId);
+    if (!cache || !currentRoute) return false;
+
+    const nextRoute = new Map(
+        Array.from(currentRoute.entries()).filter(([sequence]) => sequence < fromSequence),
+    );
+    for (const entry of replacement) {
+        if (!Number.isInteger(entry.sequence) || entry.sequence < fromSequence || nextRoute.has(entry.sequence)) return false;
+        nextRoute.set(entry.sequence, { ...entry });
+    }
+    const sequences = Array.from(nextRoute.keys()).sort((a, b) => a - b);
+    if (sequences.some((sequence, index) => index > 0 && sequence !== sequences[index - 1] + 1)) return false;
+
+    const nextSegments = new Map(cache.segments);
+    for (const segment of replacementSegments) nextSegments.set(segment.id, segment);
+    cache.segments = nextSegments;
+    cache.routesByVehicle.set(vehicleId, nextRoute);
+    return true;
+}

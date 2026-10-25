@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 
 import { db } from "@/db";
 import {
@@ -19,6 +19,7 @@ export async function GET(
 ) {
     try {
         const { id } = await context.params;
+        const requestedType = new URL(_request.url).searchParams.get("type");
 
         const simulationId = Number(id);
 
@@ -74,14 +75,16 @@ export async function GET(
                     simulationEvents.createdAt,
             })
             .from(simulationEvents)
-            .where(
-                eq(
-                    simulationEvents.simulationRunId,
-                    simulationId,
-                ),
-            )
+            .where(requestedType
+                ? and(
+                    eq(simulationEvents.simulationRunId, simulationId),
+                    eq(simulationEvents.type, requestedType),
+                )
+                : eq(simulationEvents.simulationRunId, simulationId))
             .orderBy(
-                asc(
+                requestedType ? desc(
+                    simulationEvents.simulationTime,
+                ) : asc(
                     simulationEvents.simulationTime,
                 ),
             );

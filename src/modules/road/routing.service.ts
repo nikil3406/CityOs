@@ -157,12 +157,55 @@ function signalDelaySeconds(
     return null;
 }
 
+/** Estimate a complete directed path with the same segment and signal model used by FASTEST_TIME routing. */
+export function estimateRouteTravelTimeOnNetwork(
+    networkSegments: NetworkSegment[],
+    segments: RouteSegment[],
+    intersections: number[],
+    trafficSnapshot: SimulationTrafficSnapshot,
+    initialSegmentProgress = 0,
+): number | null {
+    if (intersections.length !== segments.length + 1 || !Number.isFinite(initialSegmentProgress) || initialSegmentProgress < 0 || initialSegmentProgress > 1) return null;
+    const segmentsById = new Map(networkSegments.map((segment) => [segment.id, segment]));
+    const stats = buildSegmentTrafficStats(trafficSnapshot, networkSegments);
+    let seconds = 0;
+    for (let index = 0; index < segments.length; index++) {
+        const traversal = segments[index];
+        if (!traversal || !Number.isInteger(traversal.segmentId) || typeof traversal.isReverse !== "boolean") return null;
+        const segment = segmentsById.get(traversal.segmentId);
+        if (!segment) return null;
+        const from = traversal.isReverse ? segment.endIntersectionId : segment.startIntersectionId;
+        const to = traversal.isReverse ? segment.startIntersectionId : segment.endIntersectionId;
+        if (from !== intersections[index] || to !== intersections[index + 1]) return null;
+        const length = Number(segment.lengthMeters);
+        if (!Number.isFinite(length) || length <= 0) return null;
+        const segmentTime = routeSegmentTravelTime(segment, traversal.isReverse, trafficSnapshot, stats).seconds;
+        seconds += index === 0 ? segmentTime * (1 - initialSegmentProgress) : segmentTime;
+
+        // Match the route result estimator: observed speeds and measured queues
+        // already account for delay; otherwise add the supported turn delay.
+        const segmentStats = stats.get(`${segment.id}:${traversal.isReverse}`);
+        if (
+            index < segments.length - 1 &&
+            (segmentStats?.vehicleCount ?? 0) < 3 &&
+            (segmentStats?.queueVehicleCount ?? 0) === 0 &&
+            (segmentStats?.signalWaitingVehicleCount ?? 0) === 0
+        ) {
+            const next = segmentsById.get(segments[index + 1]?.segmentId);
+            if (!next) return null;
+            seconds += signalDelaySeconds(trafficSnapshot, to, segment.roadId, next.roadId) ?? 0;
+        }
+    }
+    return Number.isFinite(seconds) ? seconds : null;
+}
+
 export function findRouteOnNetwork(
     networkSegments: NetworkSegment[],
     startIntersectionId: number,
     destinationIntersectionId: number,
     strategy: RoutingStrategy,
     trafficSnapshot?: SimulationTrafficSnapshot,
+    initialIncomingSegment?: RouteSegment,
 ): RouteResult | null {
     if (
         !Number.isInteger(startIntersectionId) ||
@@ -202,7 +245,11 @@ export function findRouteOnNetwork(
     for (const intersectionId of graph.keys()) {
         if (useTraversalStates && intersectionId !== startIntersectionId) continue;
         const key = useTraversalStates ? startKey : `node:${intersectionId}`;
-        states.set(key, { key, intersectionId, incomingSegment: null });
+        states.set(key, {
+            key,
+            intersectionId,
+            incomingSegment: intersectionId === startIntersectionId ? initialIncomingSegment ?? null : null,
+        });
         distances.set(key, intersectionId === startIntersectionId ? 0 : Infinity);
         unvisited.add(key);
     }
